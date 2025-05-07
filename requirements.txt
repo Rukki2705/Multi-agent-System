@@ -1,0 +1,8 @@
+pandas 
+groq 
+streamlit 
+langchain 
+langchain-community 
+crewai 
+crewai-tools 
+langchain-groq 
