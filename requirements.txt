@@ -6,3 +6,5 @@ langchain-community
 crewai 
 crewai-tools 
 langchain-groq 
+scikit-learn
+statsmodels
