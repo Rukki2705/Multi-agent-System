@@ -86,6 +86,49 @@ def get_weather_summary(city: str) -> str:
     return _get_weather_summary_internal(city)
 
 @tool
+def predict_occupancy_trend(room_id: Optional[str] = None) -> str:
+    """Forecast future occupancy for a given room using ARIMA. Defaults to all rooms if not specified."""
+    try:
+        rooms_df = st.session_state.get("rooms_df")
+        if rooms_df is None or rooms_df.empty:
+            return "⚠️ No live room data available."
+
+        room_ids = [room_id] if room_id else rooms_df["RoomID"].unique()
+        forecast_results = []
+
+        now = pd.Timestamp.now()
+
+        for rid in room_ids:
+            # Generate synthetic 48-point historical occupancy data (last 48 hours)
+            history = [
+                round(random.uniform(0.0, 1.0), 2)
+                for _ in range(48)
+            ]
+
+            try:
+                model = ARIMA(history, order=(2, 1, 1))
+                model_fit = model.fit()
+                forecast = model_fit.forecast(steps=6)  # next 6 hours
+                forecast_values = [round(val, 2) for val in forecast.tolist()]
+
+                avg = sum(forecast_values) / len(forecast_values)
+                max_occ = max(forecast_values)
+                min_occ = min(forecast_values)
+
+                forecast_results.append(
+                    f"📊 Occupancy forecast for {rid} (next 6 hours):\n"
+                    f"• Avg: {avg:.2f}, Max: {max_occ:.2f}, Min: {min_occ:.2f}\n"
+                    f"• Trend: {', '.join(map(str, forecast_values))}"
+                )
+            except:
+                forecast_results.append(f"⚠️ Forecast model failed for {rid}.")
+
+        return "\n\n".join(forecast_results)
+
+    except Exception as e:
+        return f"❌ Occupancy trend forecast failed: {e}"
+
+@tool
 def simulate_energy_reduction(room: dict) -> str:
     """Simulate energy reduction by optimizing HVAC and lighting settings based on model predictions."""
     try:
@@ -175,57 +218,80 @@ def suggest_space_rezoning() -> str:
     
 @tool
 def forecast_energy_trend(room_id: Optional[str] = None) -> str:
-    """Forecast energy usage for a specific room or all rooms using ARIMA."""
+    """Generate a textual summary forecast of energy usage for specific or all rooms using ARIMA."""
     try:
         rooms_df = st.session_state.get("rooms_df")
         if rooms_df is None or rooms_df.empty:
             return "⚠️ No live room data available."
 
-        forecast_results = []
         now = pd.Timestamp.now()
-
         room_ids = [room_id] if room_id else rooms_df["RoomID"].unique()
+        summaries = []
 
         for room in room_ids:
             # Simulate synthetic historical data
-            history = []
-            for i in range(48):
-                history.append({
-                    "Timestamp": now - timedelta(hours=47 - i),
-                    "Power_kWh": round(random.uniform(0.8, 2.5) + 0.3 * (0.5 - random.random()), 2)
-                })
-            hist_df = pd.DataFrame(history).set_index("Timestamp")
-
+            history = [
+                round(random.uniform(0.8, 2.5) + 0.3 * (0.5 - random.random()), 2)
+                for _ in range(48)
+            ]
             try:
-                model = ARIMA(hist_df["Power_kWh"], order=(2, 1, 2))
+                model = ARIMA(history, order=(2, 1, 2))
                 model_fit = model.fit()
                 forecast = model_fit.forecast(steps=12)
-                for j in range(12):
-                    forecast_results.append({
-                        "RoomID": room,
-                        "Timestamp": now + timedelta(hours=j+1),
-                        "Forecast_Power_kWh": forecast.iloc[j]
-                    })
+                forecast_values = forecast.tolist()
+
+                avg = sum(forecast_values) / len(forecast_values)
+                low = min(forecast_values)
+                high = max(forecast_values)
+
+                summaries.append(
+                    f"🔮 Forecast for {room}: Avg = {avg:.2f} kWh, Range = {low:.2f} - {high:.2f} kWh over next 12 hours."
+                )
             except:
-                for j in range(12):
-                    forecast_results.append({
-                        "RoomID": room,
-                        "Timestamp": now + timedelta(hours=j+1),
-                        "Forecast_Power_kWh": None
-                    })
+                summaries.append(f"⚠️ Forecast failed for {room}.")
 
-        result_df = pd.DataFrame(forecast_results)
-        st.session_state["forecast_df"] = result_df
+        return "\n".join(summaries)
 
-        if room_id:
-            summary = result_df[result_df["RoomID"] == room_id]["Forecast_Power_kWh"].round(2).to_string(index=False)
-            return f"🔮 12-hour energy forecast for {room_id}:\n{summary}"
-        else:
-            summary = result_df.groupby("RoomID")["Forecast_Power_kWh"].mean().round(2).to_string()
-            return f"📈 Energy forecast for the next 12 hours (avg kWh):\n{summary}"
     except Exception as e:
         return f"❌ Forecasting failed: {e}"
 
+@tool
+def explain_energy_forecast_llm(room_id: str) -> str:
+    """LLM-based forecast summary for a room using current room and weather data."""
+    try:
+        rooms_df = st.session_state.get("rooms_df")
+        if rooms_df is None or rooms_df.empty or room_id not in rooms_df["RoomID"].values:
+            return f"⚠️ Room {room_id} not found in current data."
+
+        room = rooms_df[rooms_df["RoomID"] == room_id].iloc[0].to_dict()
+        weather = _get_weather_summary_internal(st.session_state.get("city_name", "New York"))
+
+        prompt = (
+            f"Given the following room and outside weather conditions, generate a detailed energy usage forecast.\n\n"
+            f"Room: {room_id}\n"
+            f"Occupancy: {room['Occupancy']}\n"
+            f"Temperature: {room['Temperature']}°C\n"
+            f"CO₂: {room['CO2']}ppm\n"
+            f"Light: {room['Light']} Lux\n"
+            f"Humidity: {room['Humidity']}%\n"
+            f"Power: {room['Power_kWh']} kWh\n"
+            f"HVAC: {room['HVAC_Status']}\n"
+            f"Lighting: {room['Lighting_Status']}\n\n"
+            f"Outside Weather:\n{weather}\n\n"
+            f"Please explain:\n"
+            f"1. Heating or cooling demand\n"
+            f"2. Lighting adjustments and their effect\n"
+            f"3. Occupancy impact\n"
+            f"4. Forecasted energy usage (range) for the next few hours\n"
+            f"5. Actionable recommendations"
+        )
+
+        model = ChatGroq(model=st.session_state.get("model_choice", "llama-3.3-70b-versatile"), temperature=0.3)
+        response = model.invoke(prompt)
+        return response.content.strip()
+
+    except Exception as e:
+        return f"❌ Energy forecast failed: {e}"
 
 # ----------------------------
 # 3. Room Generator
@@ -411,19 +477,6 @@ if groq_api_key and agent_selection != "Select Agent":
     st.subheader("📋 Live Room Snapshot")
     st.dataframe(rooms_df, use_container_width=True)
 
-    if "forecast_df" in st.session_state and not st.session_state["forecast_df"].empty:
-        st.markdown("### 🔮 Forecasted Energy Trend")
-        forecast_df = st.session_state["forecast_df"]
-        selected_room = st.selectbox("Select a room to visualize forecast", forecast_df["RoomID"].unique())
-        room_df = forecast_df[forecast_df["RoomID"] == selected_room]
-
-        if not room_df.empty:
-            room_df["Timestamp"] = pd.to_datetime(room_df["Timestamp"])
-            room_df.set_index("Timestamp", inplace=True)
-            st.line_chart(room_df["Forecast_Power_kWh"])
-        else:
-            st.warning("⚠️ No forecast data available for the selected room.")
-
     st.markdown("### 💬 Agent Chat Interface")
 
     user_input = st.chat_input("Ask the agent...")
@@ -439,7 +492,7 @@ if groq_api_key and agent_selection != "Select Agent":
                 backstory="You're an expert in spatial optimization for sustainable building operations.",
                 verbose=True,
                 allow_delegation=False,
-                tools=[get_building_summary, suggest_room_consolidation, suggest_space_rezoning],
+                tools=[get_building_summary, suggest_room_consolidation, suggest_space_rezoning, predict_occupancy_trend],
                 llm=groq_llm
             )
         else:
@@ -449,7 +502,7 @@ if groq_api_key and agent_selection != "Select Agent":
                 backstory="You're responsible for optimizing building energy systems while maintaining comfort.",
                 verbose=True,
                 allow_delegation=False,
-                tools=[get_weather_summary, simulate_energy_reduction, forecast_energy_trend],
+                tools=[get_weather_summary, simulate_energy_reduction, forecast_energy_trend, explain_energy_forecast_llm],
                 llm=groq_llm
             )
 
