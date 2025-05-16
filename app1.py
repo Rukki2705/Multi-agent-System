@@ -347,6 +347,44 @@ def identify_multiuse_zones() -> str:
         return f"❌ Error identifying flexible rooms: {e}"
 
 
+@tool
+def recommend_room_function_map() -> str:
+    """
+    Recommend a function for each room based on occupancy, power usage, and lighting.
+    Logic:
+    - High occupancy + high power → Meeting Room
+    - Low occupancy + high light → Focus Pod
+    - Low occupancy + low power → Storage/Flex Space
+    """
+    try:
+        df = st.session_state.get("rooms_df")
+        if df is None or df.empty:
+            return "⚠️ No room data available."
+
+        suggestions = []
+        for _, row in df.iterrows():
+            room_id = row["RoomID"]
+            occ = row["Occupancy"]
+            power = row["Power_kWh"]
+            light = row["Light"]
+
+            if occ > 0.6 and power > 2.5:
+                function = "🧑‍💼 Meeting Room"
+            elif occ < 0.3 and light > 300:
+                function = "🔕 Focus Pod"
+            elif occ < 0.3 and power < 1.5:
+                function = "📦 Storage or Flex Space"
+            else:
+                function = "🔄 Multi-use Room"
+
+            suggestions.append(f"{room_id}: Recommended use → {function}")
+
+        return "\n".join(suggestions)
+
+    except Exception as e:
+        return f"❌ Failed to generate room function map: {e}"
+
+
 # ----------------------------
 # 3. Room Generator
 # ----------------------------
@@ -556,7 +594,7 @@ if groq_api_key and agent_selection != "Select Agent":
                 backstory="You specialize in spatial design and dynamic reconfiguration based on usage metrics.",
                 verbose=True,
                 allow_delegation=False,
-                tools=[get_building_summary, recommend_layout_plan, identify_multiuse_zones],
+                tools=[get_building_summary, recommend_layout_plan, identify_multiuse_zones, recommend_room_function_map],
                 llm=groq_llm
             )
     
@@ -610,3 +648,5 @@ if groq_api_key and agent_selection != "Select Agent":
 
 else:
     st.info("Please enter a valid API key and select an agent task from the sidebar to begin.")
+
+
