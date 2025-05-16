@@ -292,6 +292,60 @@ def explain_energy_forecast_llm(room_id: str) -> str:
 
     except Exception as e:
         return f"❌ Energy forecast failed: {e}"
+    
+@tool
+def recommend_layout_plan() -> str:
+    """Suggest layout changes based on occupancy and usage patterns."""
+    try:
+        df = st.session_state.get("rooms_df")
+        if df is None or df.empty:
+            return "⚠️ No live room data available."
+
+        underused = df[df["Occupancy"] < 0.2]
+        overused = df[df["Occupancy"] > 0.75]
+        suggestions = []
+
+        for _, row in underused.iterrows():
+            suggestions.append(
+                f"🔄 Room {row['RoomID']} is underused (Occupancy {row['Occupancy']:.2f}). Consider repurposing it as a quiet zone, storage, or merging."
+            )
+
+        for _, row in overused.iterrows():
+            suggestions.append(
+                f"📈 Room {row['RoomID']} is heavily used (Occupancy {row['Occupancy']:.2f}). Consider creating more spaces like this or redistributing usage."
+            )
+
+        return "\n".join(suggestions) if suggestions else "✅ Current layout appears optimal."
+
+    except Exception as e:
+        return f"❌ Failed to generate layout plan: {e}"
+
+@tool
+def identify_multiuse_zones() -> str:
+    """Identify rooms suitable for multi-functional use based on usage and environment."""
+    try:
+        df = st.session_state.get("rooms_df")
+        if df is None or df.empty:
+            return "⚠️ No room data available."
+
+        flexible = df[
+            (df["Occupancy"] > 0.3) &
+            (df["Power_kWh"] < 2.5) &
+            (df["Light"] > 200) &
+            (df["Humidity"] < 50)
+        ]
+
+        if flexible.empty:
+            return "No rooms currently suitable for multi-functional use."
+
+        return "\n".join([
+            f"🌀 Room {row['RoomID']} could serve multiple purposes (e.g., meeting + focus work)."
+            for _, row in flexible.iterrows()
+        ])
+
+    except Exception as e:
+        return f"❌ Error identifying flexible rooms: {e}"
+
 
 # ----------------------------
 # 3. Room Generator
@@ -448,7 +502,7 @@ with st.sidebar:
 
     num_rooms = st.slider("🏠 Number of Rooms", min_value=3, max_value=15, value=5)
     city_name = st.text_input("🌆 Enter City for Weather", value="New York")
-    agent_selection = st.selectbox("🤖 Select Agent", ["Select Agent", "Space Optimization", "Energy Optimization"])
+    agent_selection = st.selectbox("🤖 Select Agent", ["Select Agent", "Space Optimization", "Energy Optimization", "Layout Recommendation"])
     if st.button("Clear/Reset"):
         st.session_state.clear()
 
@@ -495,6 +549,17 @@ if groq_api_key and agent_selection != "Select Agent":
                 tools=[get_building_summary, suggest_room_consolidation, suggest_space_rezoning, predict_occupancy_trend],
                 llm=groq_llm
             )
+        elif agent_selection == "Layout Recommendation":
+            agent = Agent(
+                role="Layout Planner",
+                goal="Analyze room data and suggest long-term layout changes for flexibility and efficiency.",
+                backstory="You specialize in spatial design and dynamic reconfiguration based on usage metrics.",
+                verbose=True,
+                allow_delegation=False,
+                tools=[get_building_summary, recommend_layout_plan, identify_multiuse_zones],
+                llm=groq_llm
+            )
+    
         else:
             agent = Agent(
                 role="Energy Optimization Assistant",
