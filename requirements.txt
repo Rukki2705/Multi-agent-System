@@ -9,3 +9,6 @@ langchain-groq
 scikit-learn
 statsmodels
 joblib
+pythermalcomfort
+openai
+plotly
