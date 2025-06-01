@@ -488,6 +488,7 @@ with st.sidebar:
         "LLM Used": "gpt-3.5-turbo",
         "Purpose": "Provide actionable care steps"
     }
+      ]
 }
 
 
