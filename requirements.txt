@@ -12,3 +12,4 @@ joblib
 pythermalcomfort
 openai
 plotly
+matplotlib
