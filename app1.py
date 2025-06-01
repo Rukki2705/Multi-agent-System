@@ -107,6 +107,21 @@ tools_df = pd.DataFrame({
     "Output": ["PMV, PPD, UTCI scores with thermal comfort classification", "Energy optimization actions with estimated savings & ROI", "Zone classification, underutilization alerts, consolidation suggestions", "Layout adjustments, multi-use zone identification, functional mapping"]
 })
 
+tools_df_public_sector = pd.DataFrame({
+    "Use Case": [
+        "Unemployment Policy",
+        "Healthcare Policy"
+    ],
+    "Input": [
+        "Region, job title, user profile (skills, experience, education)",
+        "User profile (age, income, family size, insurance), CMS/state websites"
+    ],
+    "Output": [
+        "In-demand job roles, unemployment disparities, retraining advice",
+        "Matched healthcare programs and enrollment actions"
+    ]
+})
+
 # Display the tools table
 #st.table(tools_df)
 
@@ -157,7 +172,8 @@ with st.sidebar:
         "Layout Planning"
     ],
     "Public Sector": [
-        "Unemployment Policy"
+        "Unemployment Policy", 
+      "Healthcare Policy"
     ]
 }
 
@@ -207,7 +223,15 @@ with st.sidebar:
     "llms": ["gpt-3.5-turbo", "gpt-4", "llama-2", "mistral-7b", "deepseek-coder"],
     "frameworks": ["CrewAI", "LangChain"],
     "libraries": ["pandas", "requests", "crewai_tools"]
+}, 
+      "Healthcare Policy": {
+    "tools": ["Scrape Policy Websites", "Match Policy to Profile", "Recommend Care Action"],
+    "platforms": ["CrewAI", "LangChain"],
+    "llms": ["gpt-3.5-turbo", "gpt-4","llama-3.3-70b-versatile","mistral-saba-24b","deepseek-r1-distill-llama-70b"],
+    "frameworks": ["CrewAI", "LangChain"],
+    "libraries": ["pandas", "requests", "crewai_tools"]
 }
+
     }
 
     # Get the selected use case data
@@ -234,6 +258,11 @@ with st.sidebar:
         "Search and Scarpe Job Posting",
         "Analyze Demographics",
         "Provide Career Guidance"
+    ], 
+      "Healthcare Policy": [
+        "Scrape Policy Websites",
+        "Match Policy to Profile",
+        "Recommend Care Action"
     ]
 }
 
@@ -337,6 +366,23 @@ with st.sidebar:
         "Tool": "Provide Career Guidance",
         "Function": "Suggests training and job opportunities based on user profile"
     }
+],
+      "Healthcare Policy": [
+    {
+        "Agent": "Policy Update Agent",
+        "Tool": "Scrape Policy Websites",
+        "Function": "Scans CMS and state health sites for new policy updates"
+    },
+    {
+        "Agent": "Eligibility Matching Agent",
+        "Tool": "Match Policy to Profile",
+        "Function": "Flags new eligibility based on user demographics"
+    },
+    {
+        "Agent": "Personal Health Advisor Agent",
+        "Tool": "Recommend Care Action",
+        "Function": "Suggests next steps like clinic visits or how to apply"
+    }
 ]
 
 }
@@ -364,20 +410,17 @@ with st.sidebar:
 })
     
     default_llm_config_public = pd.DataFrame({
-    "Agent": [
-        "Job Market Monitoring Agent",
-        "Demographic Impact Agent",
-        "Citizen Guidance Agent"
+    "Use Case": [
+        "Unemployment Policy",
+        "Healthcare Policy"
     ],
     "LLM Used": [
-        "gpt-3.5-turbo",
         "gpt-3.5-turbo",
         "gpt-3.5-turbo"
     ],
     "Purpose": [
-        "Scrape and summarize job market insights",
-        "Analyze demographic trends in unemployment",
-        "Offer personalized retraining/job advice"
+        "Job scraping, demographic trend analysis, career guidance generation",
+        "Track policy updates, assess eligibility, and recommend care actions"
     ]
 })
 
@@ -428,7 +471,23 @@ with st.sidebar:
         "LLM Used": "gpt-3.5-turbo",
         "Purpose": "Offer personalized retraining/job advice"
     }
-]
+], 
+      "Healthcare Policy": [
+    {
+        "Agent": "Policy Update Agent",
+        "LLM Used": "gpt-3.5-turbo",
+        "Purpose": "Track policy changes from health agencies"
+    },
+    {
+        "Agent": "Eligibility Matching Agent",
+        "LLM Used": "gpt-3.5-turbo",
+        "Purpose": "Match updated policies to user profiles"
+    },
+    {
+        "Agent": "Personal Health Advisor Agent",
+        "LLM Used": "gpt-3.5-turbo",
+        "Purpose": "Provide actionable care steps"
+    }
 }
 
 
@@ -2537,43 +2596,183 @@ def unemployment_policy_agent_ui():
     chat_ui()
 
 
+def healthcare_policy_agent_ui():
+    st.header("Healthcare Policy Agent")
+    st.caption("**Goal:** Monitor healthcare policy changes and guide users toward eligible programs and local care resources.")
+
+    # 🔐 Check and set API key
+    api_key = st.session_state.get("openai_api_key", "")
+    if not api_key:
+        st.warning("Please enter your OpenAI API key in the sidebar to run the agent.")
+        return
+
+    supervisor_llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.3, api_key=api_key)
+
+    st.subheader("Input Parameters")
+
+    # 🔹 User Profile Input
+    col1, col2 = st.columns(2)
+    with col1:
+        age = st.number_input("Age", min_value=0, max_value=120, value=40)
+        income = st.number_input("Annual Income ($)", min_value=0, value=30000)
+        family_size = st.number_input("Family Size", min_value=1, value=3)
+
+    with col2:
+        current_insurance = st.selectbox("Current Insurance", ["None", "Medicaid", "Marketplace", "Employer-based", "Private"])
+        location = st.text_input("Location (City)", placeholder="e.g., Los Angeles")
+
+    # 🧾 Store user profile
+    user_profile = {
+        "age": age,
+        "income": income,
+        "family_size": family_size,
+        "insurance": current_insurance,
+        "location": location
+    }
+
+    st.session_state["healthcare_profile"] = user_profile
+    st.session_state["healthcare_location"] = location
+
+    st.subheader("Interact with Agent")
+    if st.button("Execute Healthcare Policy Analysis"):
+        with st.spinner("Running Healthcare Policy Agent Crew..."):
+
+            # === Define Agents ===
+            policy_update_agent = Agent(
+                role="Policy Update Monitoring Agent",
+                goal=f"Scrape and summarize recent Medicaid, ACA, CHIP, and public health policy changes relevant to {location}.",
+                backstory="I track official sites and identify new or updated healthcare policies.",
+                allow_delegation=True,
+                verbose=True,
+                tools=[search_tool, scrape_tool]
+            )
+
+            eligibility_agent = Agent(
+                role="Eligibility Analysis Agent",
+                goal=(f"Evaluate whether the user is newly eligible for any health programs based on age {age}, income ${income}, "
+                      f"family size {family_size}, and insurance status '{current_insurance}'."),
+                backstory="I analyze health policies against the user's demographic and financial profile.",
+                allow_delegation=True,
+                verbose=True,
+                tools=[search_tool, scrape_tool]
+            )
+
+            advisor_agent = Agent(
+                role="Healthcare Access Guidance Agent",
+                goal=(f"Based on policy updates and eligibility results, recommend specific actions the user in {location} should take: "
+                      f"clinics to visit, websites to enroll, and steps to apply."),
+                backstory="I advise citizens how to access care or benefits step-by-step.",
+                allow_delegation=True,
+                verbose=True,
+                tools=[search_tool, scrape_tool]
+            )
+
+            # === Define Tasks ===
+            policy_task = Task(
+                description=(f"Search https://www.cms.gov, https://dhcs.ca.gov, and local government sites for policy changes in the past 7 days "
+                             f"affecting Medicaid, ACA, CHIP, or healthcare subsidies relevant to {location}. "
+                             f"Return a table with: Policy Title, Effective Date, Government Level, Summary."),
+                expected_output="List of new healthcare policies with date, name, level, and summary.",
+                agent=None
+            )
+
+            eligibility_task = Task(
+                description=(
+                    f"Based on the user's profile:\n"
+                    f"- Age: {age}\n"
+                    f"- Income: ${income}\n"
+                    f"- Family Size: {family_size}\n"
+                    f"- Current Insurance: {current_insurance}\n\n"
+                    f"Cross-reference this with current policies and return a list of eligible programs with:\n"
+                    f"- Program Name\n"
+                    f"- Reason for Eligibility\n"
+                    f"- Enrollment Deadline (if available)"
+                ),
+                expected_output="Bullet-point list of eligible programs with justification and deadlines.",
+                agent=None
+            )
+
+            care_task = Task(
+                description=(f"Based on the programs the user is eligible for, recommend actions specific to {location}:\n"
+                             f"Enrollment links, public health clinics, contacts, and step-by-step guides for sign-up."),
+                expected_output="List of recommended actions: location, contact, URL, and enrollment steps.",
+                agent=None
+            )
+
+            agents = [policy_update_agent, eligibility_agent, advisor_agent]
+            tasks = [policy_task, eligibility_task, care_task]
+            assigned_tasks = assign_tasks_dynamically(tasks, agents, supervisor_llm)
+
+            crew = Crew(
+                agents=agents,
+                tasks=assigned_tasks,
+                verbose=True,
+                process=Process.hierarchical,
+                manager_llm=supervisor_llm
+            )
+
+            result = crew.kickoff()
+
+            if result:
+                st.session_state.results["healthcare_policy"] = result
+                st.success("✅ Healthcare policy analysis complete.")
+                st.subheader("📋 AI-Generated Report")
+                st.markdown(result)
+
+    chat_ui()
+
+
+
 
 def show_agent_tools_table(use_case: Optional[str] = None):
     industry = st.session_state.get("industry", "")
     
     if not use_case or use_case == "Select Agent":
         st.subheader("Agent Configuration")
-        # Show default table based on industry
         if industry == "Public Sector":
             st.markdown("Showing agent tools for **Public Sector** (default)")
-            st.table(pd.DataFrame(agent_tools_table_data.get("Unemployment Policy", [])))
+            st.table(tools_df_public_sector)
+  # 👈 this is fallback
         else:
-            st.table(tools_df)  # Default energy management table
+            st.table(tools_df)
     else:
-        table_data = agent_tools_table_data.get(use_case, [])
+        table_data = agent_tools_table_data.get(use_case, [])  # ✅ Make sure Healthcare Policy is included here
         if table_data:
             df = pd.DataFrame(table_data)
             st.subheader(f"{use_case}: Agents and Tools Used")
             st.table(df)
 
-
 def show_agent_llm_table(use_case: Optional[str] = None):
     if not use_case or use_case == "Select Agent":
         st.subheader("LLM used in this Agents")
-        # Show default table based on selected industry
         industry = st.session_state.get("industry", "")
         if industry == "Public Sector":
-            st.table(default_llm_config_public)  # 👈 show public sector default
+            st.table(default_llm_config_public)
         else:
-            st.table(default_llm_config)  # 👈 fallback to Energy Management default
+            st.table(default_llm_config)
     else:
-        table_data = agent_llm_table_data.get(use_case, [])
+        table_data = agent_llm_table_data.get(use_case, [])  # ✅ Must include Healthcare Policy here
         if table_data:
             df = pd.DataFrame(table_data)
             st.subheader(f"LLM used in {use_case}")
             st.table(df)
 
 
+
+def generate_synthetic_energy_series(current_kw: float, hours: int = 24) -> pd.Series:
+    now = datetime.now().replace(minute=0, second=0, microsecond=0)
+    time_index = pd.date_range(end=now, periods=hours, freq='H')
+
+    # Mild sinusoidal + noise pattern
+    base_load = current_kw
+    hour_offsets = np.linspace(-1, 1, hours)
+    daily_pattern = 1 + 0.15 * np.sin(2 * np.pi * hour_offsets)
+    noise = np.random.normal(loc=0, scale=0.02, size=hours)
+
+    values = base_load * daily_pattern + base_load * noise
+    values = np.clip(values, 0, None)
+
+    return pd.Series(values, index=time_index, name="synthetic_energy_kw")
 
 
 
@@ -3057,17 +3256,24 @@ tool_function_map = {
 
 
 
-
-
 def main():
-    industry = st.session_state.get('industry', '')
-    use_case = st.session_state.get('use_case', '')
+    industry = st.session_state.get("industry", "")
+    use_case = st.session_state.get("use_case", "")
 
+    if not industry:
+        st.info("👋 Please select an industry from the sidebar to begin.")
+        return
+
+    # ✅ Show agent tool/LLM tables for selected industry (even before use case)
+    show_agent_tools_table(use_case)
+    show_agent_llm_table(use_case)
+
+    if not use_case:
+        st.info("📌 Now select a use case to configure agent behavior.")
+        return
+
+    # ✅ If both are selected, render use-case-specific UIs
     if industry == "Energy Management in Buildings":
-        # ✅ Show default system (tables + agent UI)
-        show_agent_tools_table(use_case)
-        show_agent_llm_table(use_case)
-
         if use_case == "Thermal Comfort Analysis":
             thermal_comfort_agent_ui()
         elif use_case == "Energy Optimization":
@@ -3076,19 +3282,16 @@ def main():
             space_optimization_agent_ui()
         elif use_case == "Layout Planning":
             layout_recommendation_agent_ui()
-    
-    elif industry == "Public Sector":
-        # 🚧 Show in-progress message
-        #st.warning("🚧 The 'Public Sector' use case is under development. Stay tuned!")
-        show_agent_tools_table(use_case)
-        show_agent_llm_table(use_case)
 
+    elif industry == "Public Sector":
         if use_case == "Unemployment Policy":
             unemployment_policy_agent_ui()
-        
-    else:
-        # 📭 Default selection prompt
-        st.info("")
+        elif use_case == "Healthcare Policy":
+            healthcare_policy_agent_ui()
+
+if __name__ == "__main__":
+    main()
+
 
 
 if __name__ == "__main__":
