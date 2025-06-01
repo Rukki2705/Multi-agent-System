@@ -2162,7 +2162,7 @@ def energy_optimization_agent_ui():
     chat_ui()
 
 
-ef space_optimization_agent_ui():
+def space_optimization_agent_ui():
     st.header("🏢 Space Optimization Assistant")
     st.caption("**Goal:** Optimize room allocation using occupancy and environmental data")
 
