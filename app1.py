@@ -16,6 +16,7 @@ from statsmodels.tsa.arima.model import ARIMA
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from typing import Optional
+from sklearn.linear_model import LinearRegression
 import joblib
 from crewai_tools import SerperDevTool, ScrapeWebsiteTool
 from langchain_openai import ChatOpenAI
