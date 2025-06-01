@@ -10,6 +10,8 @@ from crewai import Agent, Task, Crew, Process
 from crewai.tools import tool
 from datetime import datetime
 import random
+import re
+import matplotlib.pyplot as plt
 from statsmodels.tsa.arima.model import ARIMA
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
@@ -528,12 +530,14 @@ def get_sample_data():
 def calculate_thermal_metrics(inputs):
     pmv_result = pmv_ppd_iso(tdb=inputs['tdb'], tr=inputs['tr'], vr=inputs['vr'],
                            rh=inputs['rh'], met=inputs['met'], clo=inputs['clo'])
-    utci_result = utci(tdb=inputs['tdb'], tr=inputs['tr'], v=inputs['vr'], rh=inputs['rh'])
+    tdb_for_utci = inputs.get('outdoor_temp', inputs['tdb'])
+    utci_result = utci(tdb=tdb_for_utci, tr=inputs['tr'], v=inputs['vr'], rh=inputs['rh'])
+
     return {
         'pmv': round(pmv_result.pmv, 2),
         'ppd': round(pmv_result.ppd, 1),
         'utci': round(utci_result.utci, 1),
-        'utci_category': utci_result.stress_category
+        'utci_category': utci_result.stress_category if hasattr(utci_result, "stress_category") else "Unknown"
     }
 
 def _get_building_summary_internal() -> str:
@@ -699,18 +703,169 @@ def create_energy_agent():
     )
 
 
+def calculate_hvac_energy(inputs):
+    """Calculate HVAC energy consumption based on thermal load"""
+    temp_diff = abs(inputs['indoor_temp'] - inputs['setpoint_temp'])
+
+    # Cooling energy (simplified model)
+    if inputs['indoor_temp'] > inputs['setpoint_temp']:
+        cooling_load = temp_diff * inputs['building_area'] * 0.05  # kW
+        cop_cooling = 3.5  # Coefficient of Performance
+        cooling_energy = cooling_load / cop_cooling
+    else:
+        cooling_energy = 0
+
+    # Heating energy
+    if inputs['indoor_temp'] < inputs['setpoint_temp']:
+        heating_load = temp_diff * inputs['building_area'] * 0.06  # kW
+        efficiency = 0.85  # Heating efficiency
+        heating_energy = heating_load / efficiency
+    else:
+        heating_energy = 0
+
+    return {
+        'cooling_energy_kw': round(cooling_energy, 2),
+        'heating_energy_kw': round(heating_energy, 2),
+        'total_hvac_energy_kw': round(cooling_energy + heating_energy, 2)
+    }
+
+def calculate_lighting_energy(inputs):
+    """Calculate lighting energy based on occupancy and daylight"""
+    base_lighting_power = inputs['lighting_power_density']  # W/m²
+    area = inputs['building_area']
+    occupancy_factor = inputs['occupancy_rate']
+    daylight_factor = max(0.2, 1 - (inputs['daylight_lux'] / 1000))
+
+    lighting_energy = (base_lighting_power * area * occupancy_factor *
+                      daylight_factor) / 1000  # Convert to kW
+
+    return {
+        'lighting_energy_kw': round(lighting_energy, 2),
+        'daylight_savings_percent': round((1 - daylight_factor) * 100, 1)
+    }
+
+def calculate_energy_savings(current_energy, optimized_settings):
+    """Calculate potential energy savings from optimization"""
+    # Temperature setpoint optimization
+    temp_savings = 0
+    if optimized_settings['temp_adjustment'] != 0:
+        temp_savings = abs(optimized_settings['temp_adjustment']) * 0.08 * current_energy['hvac']
+
+    # Lighting optimization
+    lighting_savings = 0
+    if optimized_settings['lighting_reduction'] > 0:
+        lighting_savings = current_energy['lighting'] * optimized_settings['lighting_reduction']
+
+    # Equipment optimization
+    equipment_savings = 0
+    if optimized_settings['equipment_efficiency'] > 1:
+        equipment_savings = current_energy['equipment'] * (1 - 1/optimized_settings['equipment_efficiency'])
+
+    total_savings = temp_savings + lighting_savings + equipment_savings
+
+    return {
+        'hvac_savings_kw': round(temp_savings, 2),
+        'lighting_savings_kw': round(lighting_savings, 2),
+        'equipment_savings_kw': round(equipment_savings, 2),
+        'total_savings_kw': round(total_savings, 2),
+        'savings_percentage': round((total_savings / sum(current_energy.values())) * 100, 1)
+    }
+
+def extract_energy_findings(inputs: dict, metrics: dict) -> list:
+    findings = []
+
+    hvac_kw = metrics['hvac_energy_kw']
+    total_kw = metrics['total_current_energy_kw']
+    hvac_ratio = hvac_kw / total_kw if total_kw > 0 else 0
+
+    if hvac_ratio > 0.5:
+        findings.append(
+            f"HVAC consumes {hvac_ratio*100:.1f}% of total energy. Temperature setpoint is {inputs['setpoint_temp']}°C and indoor temperature is {inputs['current_temperature']}°C."
+        )
+
+    if inputs['ambient_light_level'] > 500 and inputs['lighting_power_usage'] > 8:
+        findings.append(
+            f"Ambient light is {inputs['ambient_light_level']} lux, but lighting power is {inputs['lighting_power_usage']} kW — possibly excessive daylight usage."
+        )
+
+    if inputs['appliance_power_usage'] > 15:
+        findings.append(
+            f"Appliance load is high at {inputs['appliance_power_usage']} kW. May indicate inefficient or continuous appliance operation."
+        )
+
+    if inputs['occupancy_rate'] < 0.3 and total_kw > 30:
+        findings.append(
+            f"Occupancy rate is low ({inputs['occupancy_rate']*100:.0f}%), but load is high ({total_kw:.1f} kW) — suggesting overuse in underutilized spaces."
+        )
+
+    return findings
+
+
+def calculate_comprehensive_energy_metrics(inputs):
+    """Calculate all energy metrics without LLM"""
+
+    # HVAC calculations
+    hvac_metrics = calculate_hvac_energy({
+        'indoor_temp': inputs['current_temperature'],
+        'setpoint_temp': inputs.get('setpoint_temp', 22),
+        'building_area': inputs.get('building_area', 100)
+    })
+
+    # Lighting calculations
+    lighting_metrics = calculate_lighting_energy({
+        'lighting_power_density': 10,  # W/m²
+        'building_area': inputs.get('building_area', 100),
+        'occupancy_rate': inputs.get('occupancy_rate', 0.7),
+        'daylight_lux': inputs['ambient_light_level']
+    })
+
+    # Current energy breakdown
+    current_energy = {
+        'hvac': inputs['current_power_consumption'] * 0.6,
+        'lighting': inputs['lighting_power_usage'],
+        'equipment': inputs['appliance_power_usage']
+    }
+
+    # Optimization scenarios
+    optimized_settings = {
+        'temp_adjustment': 2 if inputs['current_temperature'] > 24 else -2,
+        'lighting_reduction': 0.3 if inputs['ambient_light_level'] > 300 else 0.1,
+        'equipment_efficiency': 1.2
+    }
+
+    savings_metrics = calculate_energy_savings(current_energy, optimized_settings)
+
+    # Cost calculations
+    energy_rate = inputs['energy_tariff_rate']
+    annual_cost_current = sum(current_energy.values()) * 24 * 365 * energy_rate
+    annual_savings = savings_metrics['total_savings_kw'] * 24 * 365 * energy_rate
+
+    # Merge all metrics into one object
+    metrics = {
+        'hvac_energy_kw': hvac_metrics['total_hvac_energy_kw'],
+        'lighting_energy_kw': lighting_metrics['lighting_energy_kw'],
+        'total_current_energy_kw': sum(current_energy.values()),
+        'potential_savings_kw': savings_metrics['total_savings_kw'],
+        'savings_percentage': savings_metrics['savings_percentage'],
+        'annual_cost_current': round(annual_cost_current, 2),
+        'annual_savings': round(annual_savings, 2),
+        'payback_period_years': 2.5  # Typical for energy efficiency measures
+    }
+
+    # Add extracted observations
+    metrics['recommendations'] = extract_energy_findings(inputs, metrics)
+
+    return metrics
+
+
+
+
 def create_space_optimization_agent():
-    selected_labels = [
-        "Get Building Summary",
-        "Predict Occupancy Trend",
-        "Suggest Room Consolidation",
-        "Suggest Space Rezoning"
-    ]
     return Agent(
         role="Space Optimization Assistant",
-        goal="Optimize room allocation using occupancy and environment data",
-        backstory="Expert in spatial optimization for sustainable building operations",
-        tools=[tool_function_map[label] for label in selected_labels],
+        goal="Generate a detailed optimization report from tool outputs",
+        backstory="Expert in spatial efficiency and smart zoning.",
+        tools=[],  
         verbose=True,
         allow_delegation=False
     )
@@ -738,62 +893,636 @@ scrape_tool = ScrapeWebsiteTool()
 
 
 def create_thermal_analysis_task(inputs, agent):
-    return Task(
-        description=f"""Calculate thermal comfort metrics and generate a report for a
-         {inputs['building_type']} building with: Air temp {inputs['tdb']}°C, Mean radiant temp {inputs['tr']}°C,
-          Relative humidity {inputs['rh']}%, Air velocity {inputs['vr']} m/s, Activity level {inputs['met']} met,
-           Clothing insulation {inputs['clo']} clo , Do not include any header with date, location, or building type.
-Do not include any signature or prepared by section at the end.  """,
-        expected_output="Thermal comfort metrics with ASHRAE compliance analysis and a detailed report",
-        agent=agent
+    from openai import OpenAI
+    import os
+
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+    metrics = calculate_thermal_metrics(inputs)
+
+    pmv_val = metrics['pmv']
+    ppd = metrics['ppd']
+    utci = metrics['utci']
+    utci_category = metrics['utci_category'].lower()
+
+    outdoor_temp = inputs.get('outdoor_temp', inputs['tdb'])
+
+    recommended_temp = get_recommended_temperature_with_outdoor(
+        current_temp=inputs['tdb'],
+        tr=inputs['tr'],
+        vr=inputs['vr'],
+        rh=inputs['rh'],
+        met=inputs['met'],
+        clo=inputs['clo'],
+        outdoor_temp=outdoor_temp
     )
 
-def create_energy_optimization_task(thermal_data, energy_inputs, agent):
-    thermal_data_str = ""
-    if thermal_data:
-        thermal_data_str = f"""
-        Building Type: {thermal_data['building_type']}
-        Season: {thermal_data['season']}
-        Indoor Temperature: {thermal_data['tdb']}°C
-        Relative Humidity: {thermal_data['rh']}%
-        PMV: {thermal_data['pmv']}
-        PPD: {thermal_data['ppd']}%
-        UTCI: {thermal_data['utci']}°C
-        UTCI Category: {thermal_data['utci_category']}
-        Do not include any header with date, location, or building type.
-        Do not include any signature or prepared by section at the end.
-        """
+    t_comf, t_min, t_max = get_adaptive_comfort_temp(outdoor_temp)
+
+    context = """
+You are a thermal comfort analysis expert. You are provided with scientific indoor environment parameters for a room.
+DO NOT mention unrelated metrics like CO₂ levels, light intensity, cloud cover, or any environmental data not shown in the prompt.
+Base your evaluation strictly on: temperature, humidity, air velocity, metabolic rate, clothing insulation, and PMV/PPD/UTCI values.
+On the first mention of PMV, PPD, UTCI, MET, or CLO, always include the full form in parentheses.
+Abbreviation Definitions:
+- PMV: Predicted Mean Vote
+- PPD: Predicted Percentage of Dissatisfied
+- UTCI: Universal Thermal Climate Index
+- MET: Metabolic Rate
+- CLO: Clothing Insulation
+Provide actionable and technically sound advice tailored only to the data shown.
+Reference ASHRAE 55 adaptive model logic and thermal science where appropriate.
+"""
+
+    query = f"""
+Room Type: {inputs.get('building_type', 'Unknown')}
+Season: {inputs.get('season', 'Unknown')}
+Number of Occupants: {inputs.get('num_people', 1)}
+
+Indoor Conditions:
+- Air Temp: {inputs['tdb']}°C
+- Radiant Temp: {inputs['tr']}°C
+- Relative Humidity: {inputs['rh']}%
+- Air Velocity: {inputs['vr']} m/s
+- Metabolic Rate: {inputs['met']} met
+- Clothing Level: {inputs['clo']} clo
+- Outdoor Temp: {outdoor_temp}°C
+
+Thermal Comfort Metrics:
+- Predicted Mean Vote: {pmv_val}, Predicted Percentage of Dissatisfied: {ppd}%
+- Universal Thermal Climate Index: {utci}°C → {utci_category}
+- Predicted Mean Vote-based Recommended Temp: {recommended_temp}°C
+- ASHRAE 55 Adaptive Range: {t_min}°C – {t_max}°C
+- Adaptive Comfort Temp (t_comf): {t_comf}°C
+Instructions:
+1. Provide an in-depth comfort analysis explaining how each metric (temperature, humidity, air speed, clothing, metabolic rate) affects the comfort level.
+2. If any parameters seem contradictory (e.g., comfortable PMV but high UTCI), explain the contradiction clearly.
+3. Evaluate the comfort level based on the given values only.
+4. Identify specific reasons for discomfort and perform a root-cause diagnosis if PPD > 10%.
+5. Provide actionable expert-level suggestions prioritized as:
+   - Immediate (e.g., HVAC tuning, localized changes)
+   - Medium-term (e.g., behavioral changes, occupancy scheduling)
+   - Long-term (e.g., structural improvements, insulation)
+6. Include how different occupant activity levels (sedentary vs active) might perceive this environment.
+7. **IMPORTANT**: On the first mention of each of the following abbreviations, write their full form in parentheses:
+   - PMV → Predicted Mean Vote
+   - PPD → Predicted Percentage of Dissatisfied
+   - UTCI → Universal Thermal Climate Index
+   - MET → Metabolic Rate
+   - CLO → Clothing Insulation
+   For example: "PMV (Predicted Mean Vote) of 0.85 indicates..."
+8. After the first use, you may refer to these abbreviations without repeating the full form.
+9. Do not include any environmental data not shown here.
+
+
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": context},
+            {"role": "user", "content": query}
+        ],
+        temperature=0.4,
+        max_tokens=1200
+    )
+    raw_output = response.choices[0].message.content.strip()
+    final_output = enforce_full_forms(raw_output)
+
+
+
     return Task(
-        description=f"""Generate energy optimization recommendations based on the following:
-
-        {thermal_data_str if thermal_data else "No thermal comfort data available."}
-
-        Energy inputs:
-        - Total power: {energy_inputs['current_power_consumption']} kW
-        - HVAC status: {energy_inputs['hvac_status']}
-        - Lighting power: {energy_inputs['lighting_power_usage']} kW
-        - Appliance power: {energy_inputs['appliance_power_usage']} kW
-        - Energy rate: ${energy_inputs['energy_tariff_rate']}/kWh
-        """,
-        expected_output="Detailed energy optimization report with ROI analysis",
-        agent=agent
+        description= final_output,
+        agent=agent,
+        expected_output="Detailed thermal comfort evaluation with scientifically backed suggestions."
     )
 
-def create_space_optimization_task(rooms_data, agent):
-    return Task(
-        description=f"""Analyze the following room data and provide space optimization recommendations:
-        
-        {rooms_data}
-        
-        Focus on:
-        1. Identifying underutilized spaces
-        2. Suggesting room consolidation opportunities
-        3. Optimizing space allocation based on occupancy patterns
-        4. Recommending zoning improvements
-        """,
-        expected_output="Detailed space optimization recommendations with specific actions",
-        agent=agent
+
+def create_combined_thermal_analysis_task(buildings_df, agent):
+    from openai import OpenAI
+    import os
+
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+    all_building_descriptions = []
+    num_comfortable = 0
+    num_uncomfortable = 0
+    air_movement_issues = 0
+    humidity_issues = 0
+    temp_out_of_range = 0
+
+    for idx, row in buildings_df.iterrows():
+        inputs = {
+            'tdb': row['air_temperature_celsius'],
+            'tr': row['mean_radiant_temperature_celsius'],
+            'vr': row['air_velocity_meters_per_second'],
+            'rh': row['relative_humidity_percent'],
+            'met': row['metabolic_rate_met'],
+            'clo': row['clothing_insulation_clo'],
+            'outdoor_temp': row['outdoor_temperature_celsius']
+        }
+
+        metrics = calculate_thermal_metrics(inputs)
+
+        recommended_temp = get_recommended_temperature_with_outdoor(
+            current_temp=inputs['tdb'],
+            tr=inputs['tr'],
+            vr=inputs['vr'],
+            rh=inputs['rh'],
+            met=inputs['met'],
+            clo=inputs['clo'],
+            outdoor_temp=inputs['outdoor_temp']
+        )
+
+        t_comf, t_min, t_max = get_adaptive_comfort_temp(inputs['outdoor_temp'])
+
+        if metrics['ppd'] <= 10:
+            num_comfortable += 1
+        else:
+            num_uncomfortable += 1
+
+        if inputs['vr'] < 0.2:
+            air_movement_issues += 1
+
+        if inputs['rh'] < 40 or inputs['rh'] > 60:
+            humidity_issues += 1
+
+        if not (t_min <= recommended_temp <= t_max):
+            temp_out_of_range += 1
+
+        # Format the LLM prompt to match single-building tone
+        context = """
+You are a thermal comfort analysis expert. You are provided with scientific indoor environment parameters for a room.
+DO NOT mention unrelated metrics like CO₂ levels, light intensity, cloud cover, or any environmental data not shown in the prompt.
+Base your evaluation strictly on: temperature, humidity, air velocity, metabolic rate, clothing insulation, and PMV/PPD/UTCI values.
+On the first mention of PMV, PPD, UTCI, MET, or CLO, always include the full form in parentheses.
+Abbreviation Definitions:
+- PMV: Predicted Mean Vote
+- PPD: Predicted Percentage of Dissatisfied
+- UTCI: Universal Thermal Climate Index
+- MET: Metabolic Rate
+- CLO: Clothing Insulation
+Provide actionable and technically sound advice tailored only to the data shown.
+Reference ASHRAE 55 adaptive model logic and thermal science where appropriate.
+"""
+
+        query = f"""
+Room Type: {row.get('building_type', 'Unknown')}
+Season: {row.get('season', 'Unknown')}
+Number of Occupants: {row.get('number_of_occupants', 1)}
+
+Indoor Conditions:
+- Air Temp: {inputs['tdb']}°C
+- Radiant Temp: {inputs['tr']}°C
+- Relative Humidity: {inputs['rh']}%
+- Air Velocity: {inputs['vr']} m/s
+- Metabolic Rate (MET): {inputs['met']} met
+- Clothing Insulation (CLO): {inputs['clo']} clo
+- Outdoor Temp: {inputs['outdoor_temp']}°C
+
+Thermal Comfort Metrics:
+- PMV (Predicted Mean Vote): {metrics['pmv']}
+- PPD (Predicted Percentage of Dissatisfied): {metrics['ppd']}%
+- UTCI (Universal Thermal Climate Index): {metrics['utci']}°C → {metrics['utci_category']}
+- Predicted Mean Vote-based Recommended Temp: {recommended_temp}°C
+- ASHRAE 55 Adaptive Range: {t_min}°C – {t_max}°C
+- Adaptive Comfort Temp (t_comf): {t_comf}°C
+
+Instructions:
+1. Provide an in-depth comfort analysis explaining how each metric (temperature, humidity, air speed, clothing, metabolic rate) affects the comfort level.
+2. If any parameters seem contradictory (e.g., comfortable PMV but high UTCI), explain the contradiction clearly.
+3. Evaluate the comfort level based on the given values only.
+4. Identify specific reasons for discomfort and perform a root-cause diagnosis if PPD > 10%.
+5. Provide actionable expert-level suggestions prioritized as:
+   - Immediate (e.g., HVAC tuning, localized changes)
+   - Medium-term (e.g., behavioral changes, occupancy scheduling)
+   - Long-term (e.g., structural improvements, insulation)
+6. Include how different occupant activity levels (sedentary vs active) might perceive this environment.
+7. **IMPORTANT**: On the first mention of each of the following abbreviations, write their full form in parentheses:
+   - PMV → Predicted Mean Vote
+   - PPD → Predicted Percentage of Dissatisfied
+   - UTCI → Universal Thermal Climate Index
+   - MET → Metabolic Rate
+   - CLO → Clothing Insulation
+   For example: "PMV (Predicted Mean Vote) of 0.85 indicates..."
+8. After the first use, you may refer to these abbreviations without repeating the full form.
+9. Do not include any environmental data not shown here.
+"""
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": context},
+                    {"role": "user", "content": query}
+                ],
+                temperature=0.4,
+                max_tokens=1200
+            )
+            raw_response = response.choices[0].message.content.strip()
+            building_report = enforce_full_forms(raw_response)
+
+        except Exception as e:
+            building_report = f"⚠️ Error analyzing building {row.get('building_id', idx)}: {str(e)}"
+
+        all_building_descriptions.append(f"\n--- Building {idx+1} Analysis ---\n{building_report}")
+
+    # General summary in same tone
+    general_summary_prompt = f"""
+You are a building comfort optimization expert. Based on the following:
+- Comfortable buildings: {num_comfortable}
+- Uncomfortable buildings: {num_uncomfortable}
+- Issues observed:
+  - Low air movement: {air_movement_issues} cases
+  - Humidity outside 40–60%: {humidity_issues} cases
+  - Temp outside ASHRAE 55 comfort range: {temp_out_of_range} cases
+
+Provide a scientific, short summary and universal advice to improve thermal comfort in this building group. Maintain the same tone as individual building reports.
+"""
+
+    general_response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You summarize comfort trends in multiple buildings."},
+            {"role": "user", "content": general_summary_prompt}
+        ],
+        temperature=0.4,
+        max_tokens=1200
     )
+
+    summary_report = enforce_full_forms(general_response.choices[0].message.content.strip())
+
+
+    final_description = f"""
+📘 General Comfort Summary:
+{summary_report}
+
+📊 Detailed Comfort Analysis per Building:
+{''.join(all_building_descriptions)}
+""".strip()
+
+    return Task(
+        description=final_description,
+        agent=agent,
+        expected_output="Detailed thermal comfort evaluation with scientifically backed suggestions."
+    )
+
+
+
+
+
+def run_multi_building_thermal_analysis(buildings_df):
+    agent = create_thermal_agent()
+    task = create_combined_thermal_analysis_task(buildings_df, agent)
+    crew = Crew(
+        agents=[agent],
+        tasks=[task],
+        verbose=True,
+        process=Process.sequential
+    )
+    return crew.kickoff(), buildings_df
+
+if "thermal_analysis" not in st.session_state:
+    st.session_state.thermal_analysis = ""
+
+
+def fix_malformed_units(text):
+    # Fix broken monetary expressions (e.g., '0.30 per kWh' → '$0.30/kWh')
+    text = re.sub(r"(?<!\$)(\d+\.\d+)\s*per\s*kWh", r"$\1/kWh", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<!\$)(\d+\.\d+)\s*/\s*hour", r"$\1/hour", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<!\$)(\d+\.\d+)\s*/\s*day", r"$\1/day", text, flags=re.IGNORECASE)
+
+    # Compact broken unit words
+    text = re.sub(r"k\s*W\s*h", "kWh", text, flags=re.IGNORECASE)
+    text = re.sub(r"k\s*W", "kW", text, flags=re.IGNORECASE)
+    text = re.sub(r"\$ ?(\d+(?:,\d{3})*(?:\.\d+)?)", r"$\1", text)  # e.g. $ 1,200.50 → $1200.50
+
+    # Clean markdown math glitches (like split stars or units)
+    text = re.sub(r"\*\*\s*\$", "**$", text)  # Merge split bold and $
+    text = re.sub(r"\$\s*(\d+)", r"$\1", text)  # Remove space between $ and number
+
+    # Remove newlines between numbers and units like:
+    # "40.92\n/\nday" → "40.92/day"
+    text = re.sub(r"(\d+\.\d+)\s*[\r\n]+/\s*[\r\n]*(day|hour)", r"\1/\2", text, flags=re.IGNORECASE)
+
+    # Collapse multiple spaces between numbers and units
+    text = re.sub(r"(\d+\.\d+)\s+(kWh|kW|/hour|/day)", r"\1\2", text)
+
+    return text
+
+def create_energy_optimization_task(energy_inputs, agent, pricing_scheme):
+    # Initialize OpenAI client
+    client = OpenAI(api_key=st.session_state.get("openai_api_key"))
+
+    # === Step 1: Forecast Energy Usage ===
+    hourly_series = st.session_state.get("hourly_energy_series", None)
+    if hourly_series is None or len(hourly_series) < 24:
+        raise ValueError("Need at least 24 hours of historical hourly energy usage for forecasting.")
+
+    forecast_df = forecast_energy_usage_arima(hourly_series, steps=6, plot=False)
+
+    # === Step 2: Predict Optimized Energy Reduction ===
+    reduction_result = predict_energy_reduction_regression(energy_inputs)
+
+    # === Step 3: Dynamic Pricing Estimate ===
+    pricing_result = calculate_dynamic_pricing_cost(hourly_series[-24:], pricing_scheme)
+
+    # === Step 4: Compute Comprehensive Energy Metrics ===
+    metrics = calculate_comprehensive_energy_metrics(energy_inputs)
+
+    # === Step 5: Build Prompt ===
+    context = """
+You are a senior energy optimization expert helping a building manager understand energy reports.
+
+You are provided real data from forecasting, system breakdowns, and cost modeling.
+Your job is not to repeat numbers — instead, use them to draw **insights**.
+
+🎯 Your report must include:
+1. Forecast interpretation: explain the **implications** of the 6-hour trend. What does it suggest about building behavior, operations, or occupancy?
+2. Optimization analysis: Compare current and optimized usage. Identify which component (HVAC, lighting, appliances) drives overuse — and WHY it might be overused (e.g., high delta between indoor and setpoint temp, lighting running during daylight, appliances running at low occupancy).
+3. Recommendations: Provide **concrete, data-driven** actions. For each action, briefly explain how it impacts efficiency and when to implement it.
+4. Pricing response: Use the actual cost, tariff spread, and usage pattern to suggest a load shifting strategy. Quantify it in savings per hour/day.
+
+🧠 Use only the numbers given.
+💬 Speak like a human expert — avoid robotic summaries.
+📌 Expand beyond data — explain patterns, anomalies, or improvement paths.
+🧾 Format instructions:
+- Always format currency savings as **$X/hour** and **$Y/day**, not as slashed formats like `3/hour` or spread across lines.
+- Keep units like "kW", "$", and "%" on the same line as the number.
+- Use Markdown-friendly symbols (like `**bold**`, `- bullet points`, and line breaks) to structure content clearly.
+
+"""
+
+
+    query = f"""
+🔢 DATA SUMMARY:
+
+📈 Forecast (Next 6 Hours):
+{forecast_df.to_string(index=True, header=True)}
+
+🔧 Optimization Prediction:
+- Current: {reduction_result['current_power_kw']} kW
+- Optimized: {reduction_result['predicted_optimized_power_kw']} kW
+- Estimated Reduction: {reduction_result['estimated_reduction_kw']} kW ({reduction_result['reduction_percent']}%)
+
+⚙ Load Breakdown:
+- HVAC Load: {metrics['hvac_energy_kw']} kW
+- Lighting Load: {metrics['lighting_energy_kw']} kW
+- Total Load: {metrics['total_current_energy_kw']} kW
+
+💵 Pricing Summary:
+- Total Cost (Last 24h): ${pricing_result['total_cost']:.2f}
+- High-Cost Usage:
+{chr(10).join([f"{ts.strftime('%Y-%m-%d %H:%M')} — {usage:.1f} kWh @ ${rate:.2f}" for ts, usage, rate in pricing_result['high_cost_hours']]) or "None"}
+
+🎯 Based on the above, please generate an in-depth energy report following the structure:
+1. 📊 Forecast Summary
+2. ⚙ Optimization Analysis
+3. 🛠 Recommended Adjustments
+4. 💸 Pricing Optimization
+
+Use detailed reasoning. Do not repeat values without explaining them.
+"""
+
+
+    # === Step 6: Call LLM ===
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": context.strip()},
+            {"role": "user", "content": query.strip()}
+        ],
+        temperature=0.4,
+        max_tokens=1600
+    )
+
+    raw_output = response.choices[0].message.content.strip()
+    cleaned_output = fix_malformed_units(raw_output)
+    task = Task(
+        description=cleaned_output,
+        agent=agent,
+        expected_output="Structured optimization plan with forecast, adjustments, and pricing strategy."
+    )
+    return {
+        "task": task,
+        "forecast_df": forecast_df,
+        "reduction_result": reduction_result,
+    }
+
+
+def create_multi_building_optimization_tasks(building_data_list, agent, pricing_scheme):
+    client = OpenAI(api_key=st.session_state.get("openai_api_key"))
+    all_tasks = []
+
+    for idx, energy_inputs in enumerate(building_data_list):
+        try:
+            hourly_series = generate_synthetic_energy_series(energy_inputs['current_power_consumption'])
+
+            if hourly_series is None or len(hourly_series) < 24:
+                raise ValueError("Need at least 24 hours of historical hourly energy usage for forecasting.")
+
+            forecast_df = forecast_energy_usage_arima(hourly_series, steps=6, plot=False)
+            reduction_result = predict_energy_reduction_regression(energy_inputs)
+            pricing_result = calculate_dynamic_pricing_cost(hourly_series[-24:], pricing_scheme)
+            metrics = calculate_comprehensive_energy_metrics(energy_inputs)
+
+            context = """
+You are a senior energy optimization expert helping a building manager understand energy reports.
+
+You are provided real data from forecasting, system breakdowns, and cost modeling.
+Your job is not to repeat numbers — instead, use them to draw **insights**.
+
+🎯 Your report must include:
+1. Forecast interpretation: explain the **implications** of the 6-hour trend. What does it suggest about building behavior, operations, or occupancy?
+2. Optimization Analysis:
+   - Explicitly discuss the difference between current and optimized usage in **kW** and **%**.
+   - Explain if the reduction is significant, small, or zero — and **why**.
+   - If no reduction is predicted, state possible reasons (e.g., system already efficient, low baseline usage).
+3. Recommendations: Provide **concrete, data-driven** actions. For each action, briefly explain how it impacts efficiency and when to implement it.
+4. Pricing response: Use the actual cost, tariff spread, and usage pattern to suggest a load shifting strategy. Quantify it in savings per hour/day.
+
+🧠 Use only the numbers given.
+💬 Speak like a human expert — avoid robotic summaries.
+📌 Expand beyond data — explain patterns, anomalies, or improvement paths.
+🧾 Format instructions:
+- Always format currency savings as **$X/hour** and **$Y/day**, not as slashed formats like `3/hour` or spread across lines.
+- Keep units like "kW", "$", and "%" on the same line as the number.
+- Use Markdown-friendly symbols (like `**bold**`, `- bullet points`, and line breaks) to structure content clearly.
+"""
+
+            query = f"""
+🔢 DATA SUMMARY:
+
+📈 Forecast (Next 6 Hours):
+{forecast_df.to_string(index=True, header=True)}
+
+🔧 Optimization Prediction:
+- Current: {reduction_result['current_power_kw']} kW
+- Optimized: {reduction_result['predicted_optimized_power_kw']} kW
+- Estimated Reduction: {reduction_result['estimated_reduction_kw']} kW ({reduction_result['reduction_percent']}%)
+
+⚙ Load Breakdown:
+- HVAC Load: {metrics['hvac_energy_kw']} kW
+- Lighting Load: {metrics['lighting_energy_kw']} kW
+- Total Load: {metrics['total_current_energy_kw']} kW
+
+💵 Pricing Summary:
+- Total Cost (Last 24h): ${pricing_result['total_cost']:.2f}
+- High-Cost Usage:
+{chr(10).join([f"{ts.strftime('%Y-%m-%d %H:%M')} — {usage:.1f} kWh @ ${rate:.2f}" for ts, usage, rate in pricing_result['high_cost_hours']]) or "None"}
+
+🎯 Based on the above, please generate an in-depth energy report following the structure:
+1. 📊 Forecast Summary
+2. ⚙ Optimization Analysis
+3. 🛠 Recommended Adjustments
+4. 💸 Pricing Optimization
+
+Use detailed reasoning. Do not repeat values without explaining them.
+"""
+
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": context.strip()},
+                    {"role": "user", "content": query.strip()}
+                ],
+                temperature=0.4,
+                max_tokens=1600
+            )
+
+            raw_output = response.choices[0].message.content.strip()
+            cleaned_output = fix_malformed_units(raw_output)
+
+            task = Task(
+                description=cleaned_output,
+                agent=agent,
+                expected_output="Structured optimization plan with forecast, adjustments, and pricing strategy."
+            )
+
+            all_tasks.append({
+                "building_index": idx + 1,
+                "task": task,
+                "forecast_df": forecast_df,
+                "reduction_result": reduction_result
+            })
+
+        except Exception as e:
+            all_tasks.append({
+                "building_index": idx + 1,
+                "task": None,
+                "error": str(e)
+            })
+
+    return all_tasks
+
+def get_recommended_temperature_with_outdoor(current_temp, tr, vr, rh, met, clo, outdoor_temp):
+    from scipy.optimize import minimize_scalar
+
+    def objective(temp):
+        result = pmv_ppd_iso(tdb=temp, tr=tr, vr=vr, rh=rh, met=met, clo=clo)
+        return abs(result.pmv)
+
+    t_comf = 0.31 * outdoor_temp + 17.8
+    t_min = round(t_comf - 2.5, 1)
+    t_max = round(t_comf + 2.5, 1)
+
+    # Fix invalid bound error
+    lower = min(t_min, t_max)
+    upper = max(t_min, t_max)
+    if lower == upper:
+        upper += 0.5  # Ensure there is a nonzero optimization range
+
+    result = minimize_scalar(objective, bounds=(lower, upper), method="bounded")
+    return round(result.x, 1)
+
+
+def get_adaptive_comfort_temp(outdoor_temp):
+    """
+    ASHRAE-55 Adaptive Comfort Model: for naturally ventilated buildings
+    """
+    t_comf = 0.31 * outdoor_temp + 17.8
+    return round(t_comf, 1), round(t_comf - 2.5, 1), round(t_comf + 2.5, 1)
+
+
+def create_space_optimization_task(rooms_df, agent):
+    import os
+    import json
+    from openai import OpenAI
+    import streamlit as st
+
+    # ✅ Ensure the room data is available to all tools
+    st.session_state["rooms_df"] = rooms_df
+
+    # ✅ Run your tools (they rely on st.session_state["rooms_df"])
+    occupancy_forecast = predict_occupancy_trend()
+    consolidation_output = suggest_room_consolidation()
+    rezoning_output = suggest_space_rezoning()
+
+    # ✅ Format the raw room data as JSON string for LLM context
+    formatted_data = json.dumps(rooms_df.to_dict(orient="records"), indent=2)
+
+    # ✅ Set up the LLM client
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+    # ✅ System role and LLM prompt
+    context = """
+You are a senior space optimization analyst. You have been provided:
+- Raw room data with environmental and occupancy metrics
+- Forecasted occupancy trends
+- Consolidation suggestions
+- Room zoning recommendations
+
+You must now synthesize this into a professional and actionable optimization plan.
+"""
+
+    query = f"""
+📋 Raw Room Data (current snapshot):
+{formatted_data}
+
+📈 Forecasted Occupancy Trends (6-hour outlook):
+{occupancy_forecast}
+
+🔄 Room Consolidation Suggestions:
+{consolidation_output}
+
+📍 Space Re-zoning Summary:
+{rezoning_output}
+
+Instructions:
+- Always reference the full 6-hour forecasted trend per room
+- Mention the time frame (e.g., next 6 hours)
+- Avoid vague language like "slight increase" — provide actual average and values
+- Use the forecasted occupancy values exactly as given for each room.
+- Use the current occupancy values from the dataset to compare with forecasts.
+- Identify rooms at risk of underutilization (e.g., forecasted avg < 0.3 OR current very low).
+- Recommend consolidation only for rooms showing both low forecast and low current usage.
+- Justify zoning choices using room attributes like occupancy, humidity, light, power.
+
+Respond with:
+1. 📈 Occupancy Forecast Summary (mention specific rooms, trends, values)
+2. 🔄 Room Consolidation Plan with reasoning
+3. 📍 Space Rezoning Strategy — why rooms belong in each zone
+4. 💡 Additional Expert Suggestions — HVAC, lighting, scheduling improvements
+5. 📌 Final Action Plan: clear per-room next steps
+"""
+
+
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": context},
+            {"role": "user", "content": query}
+        ],
+        temperature=0.4,
+        max_tokens=1600
+    )
+
+    return Task(
+        description=response.choices[0].message.content.strip(),
+        agent=agent,
+        expected_output="Detailed optimization plan with room-specific actions based on tool outputs."
+    )
+
 
 def create_layout_recommendation_task(rooms_data, agent):
     return Task(
@@ -814,6 +1543,7 @@ def create_layout_recommendation_task(rooms_data, agent):
 
 
 
+
 def run_thermal_analysis(env_params):
     if not st.session_state.openai_api_key:
         st.error("Please enter a valid OpenAI API key to generate the report.")
@@ -829,51 +1559,138 @@ def run_thermal_analysis(env_params):
         )
         try:
             thermal_result = thermal_crew.kickoff()
-            st.session_state.messages.append({"role": "assistant", "content": thermal_result})
             return thermal_result
-            
+
         except Exception as e:
             st.error(f"Error running thermal analysis: {str(e)}")
             return None
 
-def run_energy_optimization(thermal_data, energy_inputs):
+def run_energy_optimization(energy_inputs, pricing_scheme):
+    
+
     if not st.session_state.openai_api_key:
         st.error("Please enter a valid OpenAI API key to generate recommendations.")
         return None
+
     with st.spinner("Running energy optimization with CrewAI..."):
+        # 1. Create the agent
         energy_agent = create_energy_agent()
-        energy_task = create_energy_optimization_task(thermal_data, energy_inputs, energy_agent)
-        energy_crew = Crew(
+
+        # 2. Create the task and extract forecast + reduction data
+        task_data = create_energy_optimization_task(energy_inputs, energy_agent, pricing_scheme)
+        task = task_data["task"]
+        forecast_df = task_data["forecast_df"]
+        reduction_result = task_data["reduction_result"]
+
+        # 3. Run the Crew with this single task
+        crew = Crew(
             agents=[energy_agent],
-            tasks=[energy_task],
+            tasks=[task],
             verbose=True,
             process=Process.sequential
         )
+
         try:
-            energy_result = energy_crew.kickoff()
-            st.session_state.messages.append({"role": "assistant", "content": energy_result})
-            return energy_result
+            result = crew.kickoff()
+
+            return {
+                "report": result,
+                "forecast_series": forecast_df["forecast"],  # pd.Series
+                "optimized_kw": reduction_result["estimated_reduction_kw"]  # float
+            }
+
         except Exception as e:
-            st.error(f"Error running energy optimization: {str(e)}")
+            st.error(f"❌ Error running energy optimization: {str(e)}")
             return None
+
+def run_multi_building_optimization(building_data_list, pricing_scheme):
+    """
+    Runs energy optimization for multiple buildings.
+
+    Args:
+        building_data_list (List[Dict]): List of energy_inputs for each building
+        pricing_scheme (Dict): Time-based dynamic pricing scheme
+
+    Returns:
+        List[Dict]: List of results per building, including forecast, reduction, and markdown report
+    """
+
+    if not st.session_state.get("openai_api_key"):
+        st.error("Please enter a valid OpenAI API key to generate recommendations.")
+        return None
+
+    all_results = []
+
+    with st.spinner("Running energy optimization for all buildings..."):
+        # Create a single energy agent to reuse
+        energy_agent = create_energy_agent()
+
+        # Call batch task creation
+        task_outputs = create_multi_building_optimization_tasks(building_data_list, energy_agent, pricing_scheme)
+
+        for output in task_outputs:
+            idx = output["building_index"]
+
+            if output.get("error"):
+                all_results.append({
+                    "building_index": idx,
+                    "report": None,
+                    "forecast_series": None,
+                    "optimized_kw": None,
+                    "error": output["error"]
+                })
+                continue
+
+            task = output["task"]
+            forecast_df = output["forecast_df"]
+            reduction_result = output["reduction_result"]
+
+            crew = Crew(
+                agents=[energy_agent],
+                tasks=[task],
+                verbose=True,
+                process=Process.sequential
+            )
+
+            try:
+                result = crew.kickoff()
+
+                all_results.append({
+                    "building_index": idx,
+                    "report": result,
+                    "forecast_series": forecast_df["forecast"],
+                    "optimized_kw": reduction_result["estimated_reduction_kw"],
+                    "error": None
+                })
+
+            except Exception as e:
+                all_results.append({
+                    "building_index": idx,
+                    "report": None,
+                    "forecast_series": None,
+                    "optimized_kw": None,
+                    "error": str(e)
+                })
+
+    return all_results
 
 def run_space_optimization(rooms_df):
     if not st.session_state.openai_api_key:
         st.error("Please enter a valid OpenAI API key to generate recommendations.")
         return None
-    
+
     # Convert dataframe to string representation for the task
-    rooms_data = rooms_df.to_string()
-    
+    rooms_data = rooms_df
+
     with st.spinner("Running space optimization analysis with CrewAI..."):
         space_agent = create_space_optimization_agent()
         space_task = create_space_optimization_task(rooms_data, space_agent)
-        
+
         try:
             # Set environment variable for LiteLLM
             if 'OPENAI_API_KEY' not in os.environ and st.session_state.openai_api_key:
                 os.environ['OPENAI_API_KEY'] = st.session_state.openai_api_key
-                
+
             space_crew = Crew(
                 agents=[space_agent],
                 tasks=[space_task],
@@ -881,15 +1698,15 @@ def run_space_optimization(rooms_df):
                 process=Process.sequential
             )
             space_result = space_crew.kickoff()
-            
+
             # Add to message history
             st.session_state.messages.append({"role": "assistant", "content": space_result})
-            
+
             return space_result
         except Exception as e:
             error_msg = f"Error running space optimization: {str(e)}"
             st.error(error_msg)
-            
+
             # Add error message to chat history
             st.session_state.messages.append({"role": "assistant", "content": error_msg})
             return None
@@ -991,262 +1808,429 @@ def chat_ui():
 
         st.session_state.messages.append({"role": "assistant", "content": response if isinstance(response, str) else "[Graph/Table Rendered]"})
 
+def generate_dynamic_thermal_template_custom(n_buildings, outdoor_temp):
+    
+    building_types = ["Office", "Residential", "Educational"]
+    seasons = ["Summer", "Winter"]
+
+    data = {
+        'building_id': [],
+        'air_temperature_celsius': [],
+        'mean_radiant_temperature_celsius': [],
+        'relative_humidity_percent': [],
+        'air_velocity_meters_per_second': [],
+        'metabolic_rate_met': [],
+        'clothing_insulation_clo': [],
+        'building_type': [],
+        'season': [],
+        'number_of_occupants': [],
+        'outdoor_temperature_celsius': []  
+    }
+
+    for i in range(n_buildings):
+        btype = random.choice(building_types)
+        season = random.choice(seasons)
+
+        if season == "Summer":
+            tdb = round(random.uniform(25, 28), 1)
+            tr = tdb + round(random.uniform(-0.5, 1.0), 1)
+            rh = random.randint(50, 65)
+            vr = round(random.uniform(0.15, 0.3), 2)
+            clo = 0.5
+        else:
+            tdb = round(random.uniform(20, 23), 1)
+            tr = tdb + round(random.uniform(-0.5, 0.5), 1)
+            rh = random.randint(35, 50)
+            vr = round(random.uniform(0.1, 0.2), 2)
+            clo = 1.0
+
+        if btype == "Office":
+            met = 1.2
+            occupants = random.randint(20, 100)
+        elif btype == "Residential":
+            met = 1.0
+            occupants = random.randint(2, 10)
+        elif btype == "Educational":
+            met = 1.4
+            occupants = random.randint(30, 100)
+
+        data['building_id'].append(f"B{i+1}")
+        data['air_temperature_celsius'].append(tdb)
+        data['mean_radiant_temperature_celsius'].append(tr)
+        data['relative_humidity_percent'].append(rh)
+        data['air_velocity_meters_per_second'].append(vr)
+        data['metabolic_rate_met'].append(met)
+        data['clothing_insulation_clo'].append(clo)
+        data['building_type'].append(btype)
+        data['season'].append(season)
+        data['number_of_occupants'].append(occupants)
+        data['outdoor_temperature_celsius'].append(outdoor_temp)  
+
+    return pd.DataFrame(data)
+
+
+def generate_energy_template(num_buildings: int) -> pd.DataFrame:
+    np.random.seed(42)  # For reproducibility
+
+    data = {
+        'current_temperature_celsius': np.round(np.random.uniform(22, 28, num_buildings), 1),
+        'ambient_light_level_lux': np.random.randint(300, 800, num_buildings),
+        'current_power_consumption_kilowatts': np.round(np.random.uniform(35, 60, num_buildings), 1),
+        'energy_tariff_rate_per_kilowatt_hour': np.round(np.random.uniform(0.10, 0.25, num_buildings), 2),
+        'lighting_power_usage_kilowatts': np.round(np.random.uniform(5, 20, num_buildings), 1),
+        'appliance_power_usage_kilowatts': np.round(np.random.uniform(10, 25, num_buildings), 1),
+        'building_area_square_meters': np.random.randint(50, 300, num_buildings),
+        'setpoint_temperature_celsius': np.random.choice([21, 22, 23, 24], num_buildings),
+        'occupancy_rate_decimal': np.round(np.random.uniform(0.5, 1.0, num_buildings), 2),
+        'hvac_system_status': np.random.choice(['On - Cooling', 'On - Heating', 'Off'], num_buildings)
+    }
+
+    return pd.DataFrame(data)
+
+
+
+def enforce_full_forms(text):
+    # Normalize to uppercase first
+    text = re.sub(r'\bpmv\b', 'PMV', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bppd\b', 'PPD', text, flags=re.IGNORECASE)
+    text = re.sub(r'\butci\b', 'UTCI', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bmet\b', 'MET', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bclo\b', 'CLO', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bhvac\b', 'HVAC', text, flags=re.IGNORECASE)
+
+    # Replace every instance with full form — always
+    text = re.sub(r'\bPMV\b', 'PMV (Predicted Mean Vote)', text)
+    text = re.sub(r'\bPPD\b', 'PPD (Predicted Percentage of Dissatisfied)', text)
+    text = re.sub(r'\bUTCI\b', 'UTCI (Universal Thermal Climate Index)', text)
+    text = re.sub(r'\bMET\b', 'MET (Metabolic Rate)', text)
+    text = re.sub(r'\bCLO\b', 'CLO (Clothing Insulation)', text)
+    text = re.sub(r'\bHVAC\b', 'HVAC (Heating, Ventilation, and Air Conditioning)', text)
+
+    return text
+
+
 
 def thermal_comfort_agent_ui():
     st.header("Thermal Comfort Analyst")
-    st.caption("**Goal:** Analyze indoor environmental parameters and generate technical thermal comfort reports")
-    st.subheader("Enter Location Coordinates")
-    col1, col2 = st.columns(2)
-    with col1:
-        lat = st.number_input("Latitude", min_value=-90.0, max_value=90.0, value=20.0, format="%.6f")
-    with col2:
-        lon = st.number_input("Longitude", min_value=-180.0, max_value=180.0, value=78.0, format="%.6f")
-    st.map(pd.DataFrame({'lat': [lat], 'lon': [lon]}))
-    weather_data = get_weather_data(lat, lon)
-    if weather_data:
-        st.success(f"Fetched weather: {weather_data['temperature_2m']}°C, RH {weather_data['relative_humidity_2m']}%, Wind {weather_data['wind_speed_10m']} m/s")
-    st.header("Environmental Parameters")
-    col1, col2 = st.columns(2)
-    with col1:
+    st.caption("**Goal:** Analyze indoor environmental parameters and generate simple, friendly comfort reports")
+
+    tab1, tab2 = st.tabs(["Single Building Analysis", "Multiple Buildings Analysis"])
+
+    with tab1:
+        st.subheader("Single Building Input")
+        lat = st.number_input("Latitude", -90.0, 90.0, 20.0)
+        lon = st.number_input("Longitude", -180.0, 180.0, 78.0)
+        st.map(pd.DataFrame({'lat': [lat], 'lon': [lon]}))
+
+        weather_data = get_weather_data(lat, lon)
+        if weather_data:
+            st.success(f"Fetched weather: {weather_data['temperature_2m']}°C, RH {weather_data['relative_humidity_2m']}%, Wind {weather_data['wind_speed_10m']} m/s")
+
         building_type = st.selectbox("Building Type", ["Office", "Residential", "Educational"])
         season = st.selectbox("Season", ["Summer", "Winter"])
-        tdb = st.number_input("Air Temperature (°C)",
-                             value=float(weather_data['temperature_2m']) if weather_data else 23.0)
-        tr = st.number_input("Mean Radiant Temperature (°C)", value=tdb)
-        rh = st.slider("Relative Humidity (%)", 0, 100,
-                     value=int(weather_data['relative_humidity_2m']) if weather_data else 45)
-    with col2:
-        min_vr = 0.0
-        max_vr = 1.0
-        default_vr = 0.1
-        if weather_data:
-            weather_vr = float(weather_data['wind_speed_10m'])
-            default_vr = min(max(weather_vr, min_vr), max_vr)
-        vr = st.number_input("Air Velocity (m/s)", min_value=min_vr, max_value=max_vr, value=default_vr)
-        met = st.select_slider("Activity Level (met)",
-                             options=[1.0, 1.2, 1.4, 1.6, 2.0, 2.4], value=1.4)
-        clo = st.select_slider("Clothing Insulation (clo)",
-                              options=[0.5, 0.7, 1.0, 1.5, 2.0, 2.5], value=0.5)
-    if st.button("Execute Thermal Analysis"):
-        if not st.session_state.openai_api_key:
-            st.error("Please enter a valid OpenAI API key to generate the report.")
-        else:
-            inputs = {
-                'tdb': tdb, 'tr': tr, 'rh': rh, 'vr': vr,
-                'met': met, 'clo': clo, 'building_type': building_type,
-                'season': season
-            }
-            metrics = calculate_thermal_metrics(inputs)
-            st.session_state.thermal_data = {
-                'building_type': building_type,
-                'season': season,
-                'tdb': tdb,
-                'tr': tr,
-                'rh': rh,
-                'vr': vr,
-                'met': met,
-                'clo': clo,
-                'pmv': metrics['pmv'],
-                'ppd': metrics['ppd'],
-                'utci': metrics['utci'],
-                'utci_category': metrics['utci_category']
-            }
-            thermal_result = run_thermal_analysis(inputs)
-            if thermal_result:
-                st.session_state.results["thermal_analysis"] = thermal_result
+        num_people = st.number_input("Number of Occupants", 1, 100, 1)
 
-                st.subheader("Key Metrics")
-                col1, col2, col3 = st.columns(3)
-                col1.metric("PMV", f"{metrics['pmv']}", "Neutral (0)" if -0.5 < metrics['pmv'] < 0.5 else "Needs Adjustment")
-                col2.metric("PPD", f"{metrics['ppd']}%", help="Predicted Percentage Dissatisfied")
-                col3.metric("UTCI", f"{metrics['utci']}°C", metrics['utci_category'])
-                st.success("Thermal comfort analysis complete!")
+        tdb = st.number_input("Air Temperature (°C)", value=weather_data['temperature_2m'] if weather_data else 23.0)
+        tr = st.number_input("Mean Radiant Temperature (°C)", value=tdb)
+        rh = st.slider("Relative Humidity (%)", 0, 100, int(weather_data['relative_humidity_2m']) if weather_data else 45)
+
+        wind_speed = weather_data['wind_speed_10m'] if weather_data else 0.1
+        capped_wind = min(wind_speed, 1.0)
+        vr = st.number_input("Air Velocity (m/s)", 0.0, 1.0, value=capped_wind)
+
+        met = st.select_slider("Activity Level (met)", [1.0, 1.2, 1.4, 1.6, 2.0], value=1.4)
+        clo = st.select_slider("Clothing Insulation (clo)", [0.5, 0.7, 1.0, 1.5, 2.0], value=0.5)
+        outdoor_temp = weather_data['temperature_2m'] if weather_data else tdb
+
+        if st.button("Run Comfort Analysis"):
+            if not st.session_state.openai_api_key:
+                st.error("Please add your OpenAI API key")
+            else:
+                st.session_state.thermal_analysis = ""
+                inputs = {
+                    'tdb': tdb, 'tr': tr, 'rh': rh, 'vr': vr, 'met': met, 'clo': clo,
+                    'building_type': building_type, 'season': season, 'num_people': num_people, 'outdoor_temp': outdoor_temp
+                }
+                result = run_thermal_analysis(inputs)
+                st.session_state.thermal_analysis = result
+                st.success("Comfort analysis complete!")
+
+        if st.session_state.thermal_analysis:
+            st.markdown("### 🔍 Comfort Analysis Result")
+            st.markdown(st.session_state.thermal_analysis)         
+
+    with tab2:
+        st.subheader("Multiple Building Simulation")
+        st.markdown("### 🌍 Location for Outdoor Weather Data")
+
+        lat = st.number_input("Latitude", -90.0, 90.0, value=20.0, key="multi_lat")
+        lon = st.number_input("Longitude", -180.0, 180.0, value=78.0, key="multi_lon")
+
+        
+        n_buildings = st.number_input("Number of Buildings", 1, 100, 3)
+        st.map(pd.DataFrame({'lat': [lat], 'lon': [lon]}))
+
+
+        if 'multi_building_df' not in st.session_state:
+            st.session_state.multi_building_df = None
+            st.session_state.multi_building_result = None
+
+        if st.button("Generate Building Data", key = "generate_button"):
+            weather_data = get_weather_data(lat, lon)
+            if not weather_data:
+                st.error("❌ Failed to fetch outdoor weather data.")
+            else:
+                outdoor_temp = weather_data['temperature_2m']
+                df = generate_dynamic_thermal_template_custom(n_buildings, outdoor_temp)
+                st.session_state.multi_building_df = df
+                st.session_state.multi_building_result = None
+                st.success("✅ Building dataset generated.")
+
+        if st.session_state.multi_building_df is not None:
+            st.markdown("### 🏢 Generated Building Dataset")
+            st.dataframe(st.session_state.multi_building_df)
+
+            if st.button("Run Comfort Analysis", key = "run_analysis_button"):
+                st.session_state_multi_building_result = None
+                results, _ = run_multi_building_thermal_analysis(
+                        st.session_state.multi_building_df
+                )
+                st.session_state.multi_building_result = results
+                st.success("✅ Comfort analysis completed")
+
+        if st.session_state.multi_building_result:
+            st.markdown("### Combined Comfort Report")
+            st.markdown(st.session_state.multi_building_result)
+                    
+
     chat_ui()
+
+def ensure_hourly_energy_series():
+    """Ensure hourly energy usage data exists; simulate if missing."""
+    if "hourly_energy_series" not in st.session_state:
+        # Simulate historical energy usage (48 hours)
+        now = datetime.now()
+        index = pd.date_range(end=now, periods=48, freq='h')
+        values = [round(random.uniform(38.0, 52.0), 2) for _ in range(48)]
+        st.session_state["hourly_energy_series"] = pd.Series(values, index=index)  
 
 def energy_optimization_agent_ui():
     st.header("Energy Optimization Engineer")
     st.caption("**Goal:** Recommend energy-saving actions while maintaining thermal comfort")
-    if st.session_state.thermal_data is not None:
-        st.subheader("Thermal Comfort Analysis Summary")
-        thermal_data = st.session_state.thermal_data
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Building Type", thermal_data['building_type'])
-        col2.metric("Indoor Temperature", f"{thermal_data['tdb']}°C")
-        col3.metric("PMV", f"{thermal_data['pmv']}")
-        col4.metric("UTCI", f"{thermal_data['utci']}°C", thermal_data['utci_category'])
-    else:
-        st.info("No thermal comfort data available. Consider running the Thermal Comfort Agent first for more comprehensive recommendations.")
-    st.subheader("Upload Energy Data")
-    sample_df = get_sample_data()
-    st.download_button(
-        label="Download Sample CSV Template",
-        data=sample_df.to_csv(index=False),
-        file_name="energy_data_template.csv",
-        mime="text/csv"
-    )
-    uploaded_file = st.file_uploader("Upload CSV file with energy data", type="csv")
-    current_temperature = 23.5
-    humidity_level = 45.0
-    ambient_light_level = 500
-    current_power_consumption = 45.5
-    energy_tariff_rate = 0.15
-    hvac_status = "On - Cooling"
-    lighting_status = "Dimmed"
-    appliance_status = "Essential Only"
-    lighting_power_usage = 12.3
-    appliance_power_usage = 18.7
-    if st.session_state.thermal_data:
-        current_temperature = float(st.session_state.thermal_data['tdb'])
-        humidity_level = float(st.session_state.thermal_data['rh'])
-        hvac_status = "On - Cooling" if current_temperature > 24 else "On - Heating"
-    if uploaded_file is not None:
-        try:
-            energy_data = pd.read_csv(uploaded_file)
-            st.success(f"Successfully loaded data from {uploaded_file.name}")
-            st.dataframe(energy_data)
-            if 'current_temperature' in energy_data.columns:
-                current_temperature = float(energy_data['current_temperature'].iloc[0])
-            if 'humidity_level' in energy_data.columns:
-                humidity_level = float(energy_data['humidity_level'].iloc[0])
-            if 'ambient_light_level' in energy_data.columns:
-                ambient_light_level = float(energy_data['ambient_light_level'].iloc[0])
-            if 'current_power_consumption' in energy_data.columns:
-                current_power_consumption = float(energy_data['current_power_consumption'].iloc[0])
-            if 'energy_tariff_rate' in energy_data.columns:
-                energy_tariff_rate = float(energy_data['energy_tariff_rate'].iloc[0])
-            if 'hvac_status' in energy_data.columns:
-                hvac_status = str(energy_data['hvac_status'].iloc[0])
-            if 'lighting_status' in energy_data.columns:
-                lighting_status = str(energy_data['lighting_status'].iloc[0])
-            if 'appliance_status' in energy_data.columns:
-                appliance_status = str(energy_data['appliance_status'].iloc[0])
-            if 'lighting_power_usage' in energy_data.columns:
-                lighting_power_usage = float(energy_data['lighting_power_usage'].iloc[0])
-            if 'appliance_power_usage' in energy_data.columns:
-                appliance_power_usage = float(energy_data['appliance_power_usage'].iloc[0])
-        except Exception as e:
-            st.error(f"Error processing CSV file: {e}")
-    st.subheader("Building Energy System Status")
-    col1, col2 = st.columns(2)
-    with col1:
-        current_temperature = st.number_input("Current Indoor Temperature (°C)",
-                                            value=current_temperature, step=0.1)
-        humidity_level = st.number_input("Humidity Level (%)",
-                                       value=humidity_level, step=1.0)
-        ambient_light_level = st.number_input("Ambient Light Level (lux)",
-                                            value=ambient_light_level, min_value=0, max_value=2000)
-        current_power_consumption = st.number_input("Current Power Consumption (kW)",
-                                                  value=current_power_consumption, min_value=0.0, step=0.1)
-        energy_tariff_rate = st.number_input("Energy Tariff Rate ($/kWh)",
-                                            value=energy_tariff_rate, min_value=0.01, step=0.01)
-    with col2:
-        hvac_status = st.selectbox("HVAC Status",
-                                 ["On - Cooling", "On - Heating", "On - Fan Only", "Off"],
-                                 index=["On - Cooling", "On - Heating", "On - Fan Only", "Off"].index(hvac_status) if hvac_status in ["On - Cooling", "On - Heating", "On - Fan Only", "Off"] else 0)
-        lighting_status = st.selectbox("Lighting Status",
-                                     ["Full Brightness", "Dimmed", "Partial (Zone Control)", "Off"],
-                                     index=["Full Brightness", "Dimmed", "Partial (Zone Control)", "Off"].index(lighting_status) if lighting_status in ["Full Brightness", "Dimmed", "Partial (Zone Control)", "Off"] else 0)
-        appliance_status = st.selectbox("Appliance Status",
-                                      ["All Operating", "Essential Only", "Low Power Mode", "Standby"],
-                                      index=["All Operating", "Essential Only", "Low Power Mode", "Standby"].index(appliance_status) if appliance_status in ["All Operating", "Essential Only", "Low Power Mode", "Standby"] else 0)
-        lighting_power_usage = st.number_input("Lighting Power Usage (kW)",
-                                             value=lighting_power_usage, min_value=0.0, step=0.1)
-        appliance_power_usage = st.number_input("Appliance Power Usage (kW)",
-                                              value=appliance_power_usage, min_value=0.0, step=0.1)
-    if st.button("Run Energy Optimization"):
-        if not st.session_state.openai_api_key:
-            st.error("Please enter a valid OpenAI API key to generate recommendations.")
-        else:
+
+    tab1, tab2 = st.tabs(["Single Building Analysis", "Multi-Building Analysis"])
+
+    with tab1:
+        st.subheader("Energy Consumption Parameters")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            building_area = st.number_input("Building Area (m²)", min_value=10.0, max_value=10000.0, value=100.0, step=10.0)
+            current_temperature = st.number_input("Current Indoor Temperature (°C)", min_value=10.0, max_value=40.0, value=23.0, step=0.5)
+            setpoint_temp = st.number_input("HVAC Setpoint Temperature (°C)", min_value=15.0, max_value=30.0, value=22.0, step=0.5)
+            ambient_light_level = st.number_input("Ambient Light Level (Lux)", min_value=0, max_value=2000, value=300, step=50)
+            occupancy_rate = st.slider("Occupancy Rate", 0.0, 1.0, value=0.7, step=0.1)
+
+        with col2:
+            current_power_consumption = st.number_input("Current Total Power Consumption (kW)", min_value=0.0, max_value=1000.0, value=45.0, step=1.0)
+            lighting_power_usage = st.number_input("Lighting Power Usage (kW)", min_value=0.0, max_value=100.0, value=12.0, step=0.5)
+            appliance_power_usage = st.number_input("Appliance Power Usage (kW)", min_value=0.0, max_value=500.0, value=18.0, step=1.0)
+            energy_tariff_rate = st.number_input("Energy Tariff Rate ($/kWh)", min_value=0.01, max_value=1.0, value=0.15, step=0.01)
+            hvac_status = st.selectbox("HVAC Status", ["On - Cooling", "On - Heating", "Off", "Auto"])
+
+        if st.button("Execute Energy Optimization Analysis"):
+            if not st.session_state.get("openai_api_key"):
+                st.error("Please enter a valid OpenAI API key.")
+                return
+            
+            if "hourly_energy_series" not in st.session_state:
+                st.session_state.hourly_energy_series = generate_synthetic_energy_series(current_power_consumption)
+
+            ensure_hourly_energy_series()
+
+            # Prepare input dictionary
             energy_inputs = {
+                'building_area': building_area,
                 'current_temperature': current_temperature,
-                'humidity_level': humidity_level,
+                'setpoint_temp': setpoint_temp,
                 'ambient_light_level': ambient_light_level,
+                'occupancy_rate': occupancy_rate,
                 'current_power_consumption': current_power_consumption,
+                'lighting_power_usage': lighting_power_usage,
+                'appliance_power_usage': appliance_power_usage,
                 'energy_tariff_rate': energy_tariff_rate,
                 'hvac_status': hvac_status,
-                'lighting_status': lighting_status,
-                'appliance_status': appliance_status,
-                'lighting_power_usage': lighting_power_usage,
-                'appliance_power_usage': appliance_power_usage
+                'lighting_power_density': 10  # Fixed value; optional for user to control
             }
-            energy_result = run_energy_optimization(st.session_state.thermal_data, energy_inputs)
-            if energy_result:
-                st.session_state.results["energy_optimization"] = energy_result
+
+            pricing_scheme = {
+                0: 0.10, 1: 0.10, 17: 0.30, 18: 0.35, 19: 0.33,
+                'default': 0.15
+            }
+
+            # Run optimization
+            result = run_energy_optimization(energy_inputs, pricing_scheme)
+
+            if result:
+                st.session_state.results["energy_optimization"] = result["report"]
+
+                st.subheader("📘 Agent Recommendation")
+                st.markdown(result["report"])
+
+                # ✅ Plot forecast vs optimized usage
+                st.subheader("📉 Energy Forecast vs Optimization")
+                plot_actual_vs_optimized(result["forecast_series"], result["optimized_kw"])
+            else:
+                st.error("❌ Optimization task failed.")
+
+        with tab2:
+            st.subheader("Multi-Building Energy Analysis")
+            st.info("Upload a CSV file with energy records for batch optimization analysis.")
+
+    # Let user define number of buildings
+            num_buildings = st.number_input("Number of buildings to generate in template", min_value=1, max_value=100, value=3)
+    
+            if st.button("Generate Dynamic CSV Template"):
+                template_df = generate_energy_template(num_buildings)  # Uses the earlier helper function
+                st.download_button(
+            label="📥 Download Energy CSV Template",
+            data=template_df.to_csv(index=False),
+            file_name="energy_optimization_template.csv",
+            mime="text/csv"
+                )
+
+            uploaded_file = st.file_uploader("Upload CSV file with building energy data", type="csv")
+
+            if uploaded_file is not None:
+                df = pd.read_csv(uploaded_file)
+
+                st.success(f"Successfully loaded {len(df)} building records")
+                st.dataframe(df, use_container_width=True)
+
+                if st.button("Execute Batch Energy Optimization"):
+                    if not st.session_state.get("openai_api_key"):
+                        st.error("Please enter a valid OpenAI API key.")
+                    else:
+                        reports = []
+                        forecasts = []
+
+                        pricing_scheme = {
+                    0: 0.10, 1: 0.10, 17: 0.30, 18: 0.35, 19: 0.33,
+                    'default': 0.15
+                    }
+
+                        for i, row in df.iterrows():
+                            energy_inputs = {
+                        'building_area': row['building_area_square_meters'],
+                        'current_temperature': row['current_temperature_celsius'],
+                        'setpoint_temp': row['setpoint_temperature_celsius'],
+                        'ambient_light_level': row['ambient_light_level_lux'],
+                        'occupancy_rate': row['occupancy_rate_decimal'],
+                        'current_power_consumption': row['current_power_consumption_kilowatts'],
+                        'lighting_power_usage': row['lighting_power_usage_kilowatts'],
+                        'appliance_power_usage': row['appliance_power_usage_kilowatts'],
+                        'energy_tariff_rate': row['energy_tariff_rate_per_kilowatt_hour'],
+                        'hvac_status': row['hvac_system_status'],
+                        'lighting_power_density': 10  # Optional fixed value
+                    }
+
+                            synthetic_series = generate_synthetic_energy_series(
+                        row['current_power_consumption_kilowatts']
+                    )
+                            st.session_state.hourly_energy_series = synthetic_series
+                            ensure_hourly_energy_series()
+
+                            result = run_energy_optimization(energy_inputs, pricing_scheme)
+
+                            if result:
+                                reports.append((i, result["report"]))
+                                forecasts.append((i, result["forecast_series"], result["optimized_kw"]))
+                            else:
+                                reports.append((i, f"❌ Failed to process building index {i}"))
+
+                        st.subheader("📘 Optimization Reports")
+                        for idx, report in reports:
+                            st.markdown(f"### 🏢 Building {idx + 1}")
+                            st.markdown(report)
+
+                        st.subheader("📉 Forecast vs Optimized Energy Usage")
+                        for idx, forecast_series, optimized_kw in forecasts:
+                            st.markdown(f"### 🔋 Building {idx + 1}")
+                            plot_actual_vs_optimized(forecast_series, optimized_kw)
 
     chat_ui()
 
-def space_optimization_agent_ui():
-    st.header("Space Optimization Assistant")
-    st.caption("**Goal:** Optimize room allocation using occupancy and environment data")
-    
-    # Generate live room data if not already in session state
-    if "rooms_df" not in st.session_state or st.session_state.get("num_rooms") != st.session_state.num_rooms:
-        st.session_state.rooms_df = get_live_room_data(num_rooms=st.session_state.num_rooms)
-    
-    rooms_df = st.session_state.rooms_df
-    
-    st.subheader("Building Overview")
-    building_summary = _get_building_summary_internal()
-    st.info(building_summary)
-    
-    st.subheader("Room Data")
-    st.dataframe(rooms_df, use_container_width=True)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Refresh Room Data"):
-            st.session_state.rooms_df = get_live_room_data(num_rooms=st.session_state.num_rooms)
-            st.rerun()
-    with col2:
-        if st.button("Run Space Optimization Analysis"):
-            if not st.session_state.openai_api_key:
-                st.error("Please enter a valid OpenAI API key to generate recommendations.")
-            else:
-                space_result = run_space_optimization(st.session_state.rooms_df)
-                if space_result:
-                    st.session_state.results["space_optimization"] = space_result
-                    st.subheader("🤖 AI Space Optimization Recommendations")
-                    st.markdown(str(space_result))
-    
-    # Display visualizations
-    st.subheader("Room Occupancy Visualization")
-    fig = {
-        'data': [
-            {
-                'x': rooms_df['RoomID'],
-                'y': rooms_df['Occupancy'],
-                'type': 'bar',
-                'marker': {'color': rooms_df['Occupancy'].apply(lambda x: 'red' if x > 0.7 else 'orange' if x > 0.4 else 'green')}
+
+ef space_optimization_agent_ui():
+    st.header("🏢 Space Optimization Assistant")
+    st.caption("**Goal:** Optimize room allocation using occupancy and environmental data")
+
+    st.subheader("1️⃣ Generate Room Dataset")
+
+    # Input: number of rooms to simulate
+    num_rooms = st.number_input(
+        "Enter number of rooms to simulate:", min_value=1, max_value=100, value=5, step=1
+    )
+
+    # Button to generate room data
+    if st.button("🔄 Generate Room Data"):
+        st.session_state.rooms_df = get_live_room_data(num_rooms=num_rooms)
+        st.success(f"✅ Generated dataset for {num_rooms} rooms.")
+
+    # Proceed if room data is available
+    if "rooms_df" in st.session_state and st.session_state.rooms_df is not None:
+        rooms_df = st.session_state.rooms_df
+
+        st.subheader("📊 Room Data Preview")
+        st.dataframe(rooms_df, use_container_width=True)
+
+        st.subheader("2️⃣ Run Space Optimization Analysis")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🚀 Run Optimization Analysis"):
+                if not st.session_state.openai_api_key:
+                    st.error("Please enter a valid OpenAI API key.")
+                else:
+                    space_result = run_space_optimization(rooms_df)
+                    if space_result:
+                        st.session_state.results["space_optimization"] = space_result
+                        st.success("✅ Optimization analysis complete.")
+
+        with col2:
+            if st.button("🔁 Reset Session"):
+                st.session_state.clear()
+                st.rerun()
+
+        # Visualization of occupancy
+        st.subheader("📉 Room Occupancy Visualization")
+        fig = {
+            'data': [
+                {
+                    'x': rooms_df['RoomID'],
+                    'y': rooms_df['Occupancy'],
+                    'type': 'bar',
+                    'marker': {
+                        'color': rooms_df['Occupancy'].apply(
+                            lambda x: 'red' if x > 0.7 else 'orange' if x > 0.4 else 'green'
+                        )
+                    }
+                }
+            ],
+            'layout': {
+                'title': 'Room Occupancy Levels',
+                'xaxis': {'title': 'Room ID'},
+                'yaxis': {'title': 'Occupancy Rate (0-1)'}
             }
-        ],
-        'layout': {
-            'title': 'Room Occupancy Levels',
-            'xaxis': {'title': 'Room ID'},
-            'yaxis': {'title': 'Occupancy Rate (0-1)'}
         }
-    }
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Temperature vs. Occupancy scatter plot
-    fig2 = {
-        'data': [
-            {
-                'x': rooms_df['Temperature'],
-                'y': rooms_df['Occupancy'],
-                'mode': 'markers',
-                'type': 'scatter',
-                'text': rooms_df['RoomID'],
-                'marker': {'size': 10, 'color': rooms_df['CO2'], 'colorscale': 'Viridis', 'showscale': True}
-            }
-        ],
-        'layout': {
-            'title': 'Temperature vs. Occupancy (Color = CO2 Level)',
-            'xaxis': {'title': 'Temperature (°C)'},
-            'yaxis': {'title': 'Occupancy Rate (0-1)'}
-        }
-    }
-    st.plotly_chart(fig2, use_container_width=True)
-    
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Show optimization result if available
+        if "space_optimization" in st.session_state.results:
+            st.subheader("📋 Optimization Results")
+            st.markdown(st.session_state.results["space_optimization"])
+
+    # Optional chatbot / interaction panel
     chat_ui()
 
 def show_optimized_layout_plotly(rooms_df, recommendations):
@@ -1646,8 +2630,150 @@ def get_weather_summary(city: str) -> str:
     return _get_weather_summary_internal(city)
 
 
+def plot_actual_vs_optimized(forecast_series: pd.Series, optimized_kw: float):
+    """
+    Plot actual vs optimized energy usage based on forecast and predicted savings.
+    """
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import streamlit as st
 
-@tool
+    # Construct optimized series
+    optimized_series = forecast_series - optimized_kw
+    optimized_series = optimized_series.clip(lower=0)
+
+    df = pd.DataFrame({
+        "Forecasted Energy (kW)": forecast_series,
+        "Optimized Energy (kW)": optimized_series
+    })
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(df.index, df["Optimized Energy (kW)"], marker='o', linestyle='--', label="Optimized Forecast")
+    ax.set_title("Actual vs Optimized Energy Forecast (Next 6 Hours)")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Energy Usage (kW)")
+    ax.legend()
+    ax.grid(True)
+    plt.xticks(rotation=45)
+
+    st.pyplot(fig)
+
+
+def forecast_energy_usage_arima(energy_series: pd.Series, steps: int = 6, plot: bool = False) -> pd.DataFrame:
+    """
+    Forecast energy usage for next N hours using ARIMA.
+    Returns a DataFrame with index as datetime and column "forecast".
+    """
+    energy_series = energy_series.sort_index().asfreq('h')
+
+    model = ARIMA(energy_series, order=(2, 1, 2))
+    model_fit = model.fit()
+    forecast = model_fit.forecast(steps=steps)
+
+    forecast_index = pd.date_range(start=energy_series.index[-1] + pd.Timedelta(hours=1), periods=steps, freq='h')
+    forecast_df = pd.DataFrame({'forecast': forecast.values}, index=forecast_index)
+
+    if plot:
+        plt.figure(figsize=(10, 4))
+        plt.plot(energy_series[-24:], label="Historical Usage", color="blue")
+        plt.plot(forecast_df, label="Forecast", linestyle='--', marker='o', color="orange")
+        plt.title("ARIMA Forecast")
+        plt.xlabel("Time")
+        plt.ylabel("Energy (kW)")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+    return forecast_df
+
+def predict_energy_reduction_regression(features: dict) -> dict:
+    """
+    Simulate a regression model to predict energy reduction potential based on building features.
+
+    Parameters:
+    - features (dict): Building conditions and usage metrics
+
+    Returns:
+    - dict with predicted optimized energy and estimated reduction
+    """
+    # Feature vector (same order as training)
+    X = np.array([[
+        features['current_power_consumption'],
+        features['occupancy_rate'],
+        features['current_temperature'],
+        features['setpoint_temp'],
+        features['ambient_light_level'],
+        features['lighting_power_usage'],
+        features['appliance_power_usage'],
+    ]])
+
+    # Simulated trained regression model
+    model = LinearRegression()
+    model.coef_ = np.array([0.6, 5, 1.2, -1.5, 0.02, 0.8, 0.5])
+    model.intercept_ = 5
+    model._residues = 0  # compatibility fix
+
+    # Actual values
+    current_power = features['current_power_consumption']
+
+    # Predict optimized power
+    predicted_optimized_power = model.predict(X)[0]
+    predicted_optimized_power = min(current_power, max(0, predicted_optimized_power))
+
+    # Calculate reduction
+    reduction = current_power - predicted_optimized_power
+    percent_reduction = (reduction / current_power) * 100 if current_power > 0 else 0
+
+    return {
+        "current_power_kw": round(current_power, 2),
+        "predicted_optimized_power_kw": round(predicted_optimized_power, 2),
+        "estimated_reduction_kw": round(reduction, 2),
+        "reduction_percent": round(percent_reduction, 1)
+    }
+
+
+
+def calculate_dynamic_pricing_cost(usage_series: pd.Series, pricing_scheme: dict, alert_threshold: float = 0.25) -> dict:
+    """
+    Calculate total energy cost using dynamic pricing and trigger alerts for high-tariff usage.
+
+    Parameters:
+    - usage_series (pd.Series): Hourly power usage in kWh, indexed by datetime.
+    - pricing_scheme (dict): Dictionary mapping hour (0-23) to price in $/kWh.
+                             Should include a 'default' key as fallback.
+                             Example: {0: 0.10, 17: 0.30, 18: 0.35, 'default': 0.15}
+    - alert_threshold (float): Tariff threshold to flag high-cost hours.
+
+    Returns:
+    - dict with:
+        - total_cost: float
+        - hourly_costs: pd.Series
+        - high_cost_hours: list of (timestamp, usage, rate)
+    """
+    total_cost = 0.0
+    hourly_costs = []
+    high_cost_hours = []
+
+    for timestamp, usage in usage_series.items():
+        hour = timestamp.hour
+        rate = pricing_scheme.get(hour, pricing_scheme.get("default", 0.15))
+        cost = usage * rate
+        total_cost += cost
+        hourly_costs.append(cost)
+
+        if rate >= alert_threshold and usage > 0:
+            high_cost_hours.append((timestamp, usage, rate))
+
+    hourly_cost_series = pd.Series(hourly_costs, index=usage_series.index)
+
+    return {
+        "total_cost": round(total_cost, 2),
+        "hourly_costs": hourly_cost_series,
+        "high_cost_hours": high_cost_hours
+    }
+
 def predict_occupancy_trend(room_id: Optional[str] = None) -> str:
     """Forecast future occupancy for a given room using ARIMA. Defaults to all rooms if not specified."""
     try:
@@ -1717,7 +2843,7 @@ def simulate_energy_reduction(room: dict) -> str:
     
 
 
-@tool
+
 def suggest_room_consolidation() -> str:
     """Suggest consolidation of underutilized rooms based on occupancy threshold."""
     try:
@@ -1741,7 +2867,7 @@ def suggest_room_consolidation() -> str:
 
 
 
-@tool
+
 def suggest_space_rezoning() -> str:
     """Cluster rooms into zones based on occupancy, temperature, CO2, light, humidity, and energy usage."""
     try:
@@ -1927,205 +3053,10 @@ tool_function_map = {
     "Room Function Mapping": recommend_room_function_map
 }
 
-def space_optimization_agent_ui():
-    st.header("Space Optimization Assistant")
-    st.caption("**Goal:** Optimize room allocation using occupancy and environment data")
-
-    # 🔁 Generate sample room data once on first load or refresh
-    if (
-        "rooms_df_sample" not in st.session_state or
-        st.session_state.get("agent_loaded") != "space"
-    ):
-        st.session_state.rooms_df_sample = get_live_room_data(num_rooms=st.session_state.num_rooms)
-        st.session_state.agent_loaded = "space"
-
-    st.subheader("Download and Upload Building Facility Data")
-
-    # 📥 Sample CSV Download
-    st.download_button(
-        label="Download Sample Room Data (CSV)",
-        data=st.session_state.rooms_df_sample.to_csv(index=False),
-        file_name="room_data_template.csv",
-        mime="text/csv"
-    )
-
-    # 📤 Upload CSV File
-    uploaded_file = st.file_uploader("Upload Room CSV File", type="csv")
-    if uploaded_file is not None:
-        try:
-            st.session_state.rooms_df = pd.read_csv(uploaded_file)
-            st.success(f"Successfully loaded data from {uploaded_file.name}")
-        except Exception as e:
-            st.error(f"Error reading uploaded file: {e}")
-            return
-
-    # 👉 Only show if uploaded file was provided
-    if "rooms_df" in st.session_state and st.session_state.rooms_df is not None:
-        rooms_df = st.session_state.rooms_df
-        st.subheader("Room Data")
-        st.dataframe(rooms_df, use_container_width=True)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Refresh Room Data"):
-                st.session_state.rooms_df_sample = get_live_room_data(num_rooms=st.session_state.num_rooms)
-                del st.session_state.rooms_df  # remove uploaded df to force new upload
-                st.rerun()
-        with col2:
-            if st.button("Run Space Optimization Analysis"):
-                if not st.session_state.openai_api_key:
-                    st.error("Please enter a valid OpenAI API key to generate recommendations.")
-                else:
-                    space_result = run_space_optimization(rooms_df)
-                    if space_result:
-                        st.session_state.results["space_optimization"] = space_result
-                        st.subheader("🤖 AI Space Optimization Recommendations")
-                        st.markdown(space_result)
-
-        # 📊 Visualization
-        st.subheader("Room Occupancy Visualization")
-        fig = {
-            'data': [
-                {
-                    'x': rooms_df['RoomID'],
-                    'y': rooms_df['Occupancy'],
-                    'type': 'bar',
-                    'marker': {'color': rooms_df['Occupancy'].apply(lambda x: 'red' if x > 0.7 else 'orange' if x > 0.4 else 'green')}
-                }
-            ],
-            'layout': {
-                'title': 'Room Occupancy Levels',
-                'xaxis': {'title': 'Room ID'},
-                'yaxis': {'title': 'Occupancy Rate (0-1)'}
-            }
-        }
-        st.plotly_chart(fig, use_container_width=True)
-
-        fig2 = {
-            'data': [
-                {
-                    'x': rooms_df['Temperature'],
-                    'y': rooms_df['Occupancy'],
-                    'mode': 'markers',
-                    'type': 'scatter',
-                    'text': rooms_df['RoomID'],
-                    'marker': {'size': 10, 'color': rooms_df['CO2'], 'colorscale': 'Viridis', 'showscale': True}
-                }
-            ],
-            'layout': {
-                'title': 'Temperature vs. Occupancy (Color = CO2 Level)',
-                'xaxis': {'title': 'Temperature (°C)'},
-                'yaxis': {'title': 'Occupancy Rate (0-1)'}
-            }
-        }
-        st.plotly_chart(fig2, use_container_width=True)
-
-    else:
-        st.info("⬆️ Please upload the room data CSV to display analysis tools.")
-
-    chat_ui()
 
 
 
-def layout_recommendation_agent_ui():
-    st.header("Layout Planner")
-    st.caption("**Goal:** Analyze room data and suggest long-term layout changes for flexibility and efficiency")
 
-    # 🔁 Generate sample room data once
-    if (
-        "rooms_df_sample" not in st.session_state or
-        st.session_state.get("agent_loaded") != "layout"
-    ):
-        st.session_state.rooms_df_sample = get_live_room_data(num_rooms=st.session_state.num_rooms)
-        st.session_state.agent_loaded = "layout"
-
-    st.subheader("Download and Upload Building Facility Data")
-
-    # 📥 Download sample template
-    st.download_button(
-        label="Download Sample Room Data (CSV)",
-        data=st.session_state.rooms_df_sample.to_csv(index=False),
-        file_name="layout_room_data_template.csv",
-        mime="text/csv"
-    )
-
-    # 📤 Upload CSV for layout recommendation
-    uploaded_file = st.file_uploader("Upload Room CSV File", type="csv")
-    if uploaded_file is not None:
-        try:
-            st.session_state.rooms_df = pd.read_csv(uploaded_file)
-            st.success(f"Successfully loaded data from {uploaded_file.name}")
-        except Exception as e:
-            st.error(f"Error reading uploaded file: {e}")
-            return
-
-    # 👉 Only proceed if data is uploaded
-    if "rooms_df" in st.session_state and st.session_state.rooms_df is not None:
-        rooms_df = st.session_state.rooms_df
-
-        st.subheader("Room Data")
-        st.dataframe(rooms_df, use_container_width=True)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Refresh Room Data"):
-                st.session_state.rooms_df_sample = get_live_room_data(num_rooms=st.session_state.num_rooms)
-                del st.session_state.rooms_df  # remove uploaded data to trigger reupload
-                st.rerun()
-        with col2:
-            if st.button("Generate Layout Recommendations"):
-                if not st.session_state.openai_api_key:
-                    st.error("Please enter a valid OpenAI API key to generate recommendations.")
-                else:
-                    layout_result = run_layout_recommendation(rooms_df)
-                    if layout_result:
-                        st.session_state.results["layout_recommendation"] = layout_result
-                        st.subheader("🧠 Layout Recommendations")
-                        st.markdown(layout_result)
-
-        # 📊 Visualization: Power usage
-        st.subheader("Room Usage Analysis")
-        fig1 = {
-            'data': [
-                {
-                    'x': rooms_df['RoomID'],
-                    'y': rooms_df['Power_kWh'],
-                    'type': 'bar',
-                    'name': 'Power Usage (kWh)',
-                    'marker': {'color': 'blue'}
-                }
-            ],
-            'layout': {
-                'title': 'Power Usage by Room',
-                'xaxis': {'title': 'Room ID'},
-                'yaxis': {'title': 'Power (kWh)'}
-            }
-        }
-        st.plotly_chart(fig1, use_container_width=True)
-
-        # 📊 Visualization: Radar metrics
-        fig2 = {
-            'data': [
-                {
-                    'type': 'scatterpolar',
-                    'r': [row['Occupancy'], row['Temperature']/30, row['CO2']/1200,
-                          row['Light']/600, row['Humidity']/100, row['Power_kWh']/4],
-                    'theta': ['Occupancy', 'Temperature', 'CO2', 'Light', 'Humidity', 'Power'],
-                    'fill': 'toself',
-                    'name': row['RoomID']
-                } for _, row in rooms_df.iterrows()
-            ],
-            'layout': {
-                'title': 'Room Metrics Comparison',
-                'polar': {'radialaxis': {'visible': True, 'range': [0, 1]}}
-            }
-        }
-        st.plotly_chart(fig2, use_container_width=True)
-
-    else:
-        st.info("⬆️ Please upload the room data CSV to proceed with layout recommendations.")
-
-    chat_ui()
 
 def main():
     industry = st.session_state.get('industry', '')
