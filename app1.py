@@ -108,15 +108,18 @@ tools_df = pd.DataFrame({
 tools_df_public_sector = pd.DataFrame({
     "Use Case": [
         "Unemployment Policy",
-        "Healthcare Policy"
+        "Healthcare Policy",
+        "Public Threat Analysis"
     ],
     "Input": [
         "Region, job title, user profile (skills, experience, education)",
-        "User profile (age, income, family size, insurance), CMS/state websites"
+        "User profile (age, income, family size, insurance), CMS/state websites",
+        "ZIP code or city name, recent public crime data, news websites"
     ],
     "Output": [
         "In-demand job roles, unemployment disparities, retraining advice",
-        "Matched healthcare programs and enrollment actions"
+        "Matched healthcare programs and enrollment actions",
+        "Crime type breakdown, severity score (1–10), safety recommendation"
     ]
 })
 
