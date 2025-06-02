@@ -69,15 +69,15 @@ div[data-testid="stSidebar"] div[role="listbox"] ul li {
 
 st.markdown("""
 <div style='text-align: center; margin-bottom: 12px;'>
-    <img src="https://raw.githubusercontent.com/LLM-AI-INDIA/GenAI-Bootcamp-FEB2025/main/Lab-4/image/default_logo.png"
+    <img src="https://raw.githubusercontent.com/Rukki2705/Multi-agent-System/main/Logo.png"
          alt="App Logo"
          style="width:300px; height:150px; border-radius:10%;" />
 </div>
 <div style='text-align: center; color: #003366; font-size: 23px; font-weight: 500; margin-bottom: 12px;'>
-    Our Multi-Agent Orchestration simplifies smart building maintenance
+    Our Multi-Agent Orchestration simplifies complex operational processes
 </div>
 <div style='text-align: center; color: blue; font-size: 16px; margin-top: -10px;'>
-    The agentic approach saves time, reduce costs, improves accuracy and enhances user experience
+The agentic approach saves time, reduces costs, improves accuracy and enhances user experience
 </div>
 <hr style="border: 1px solid gray; height:2.5px; margin-top:0px; width:100%; background-color:gray;">
 """, unsafe_allow_html=True)
@@ -215,17 +215,29 @@ with st.sidebar:
         "Provide Career Guidance"
     ],
     "platforms": ["CrewAI", "langChain"],
-    "llms": ["gpt-3.5-turbo", "gpt-4","llama-3.3-70b-versatile","mistral-saba-24b","deepseek-r1-distill-llama-70b"],
+    "llms": ["gpt-3.5-turbo", "gpt-4"],
     "frameworks": ["CrewAI", "LangChain"],
     "libraries": ["pandas", "requests", "crewai_tools"]
 },
     "Healthcare Policy": {
     "tools": ["Scrape Policy Websites", "Match Policy to Profile", "Recommend Care Action"],
     "platforms": ["CrewAI", "LangChain"],
-    "llms": ["gpt-3.5-turbo", "gpt-4","llama-3.3-70b-versatile","mistral-saba-24b","deepseek-r1-distill-llama-70b"],
+    "llms": ["gpt-3.5-turbo", "gpt-4"],
     "frameworks": ["CrewAI", "LangChain"],
     "libraries": ["pandas", "requests", "crewai_tools"]
+},
+    "Public Threat Analysis": {
+    "tools": [
+        "Search and Scrape Crime Reports",
+        "Classify Crime by Type",
+        "Generate Risk and Safety Recommendations"
+    ],
+    "platforms": ["CrewAI", "LangChain"],
+    "llms": ["gpt-3.5-turbo", "gpt-4"],
+    "frameworks": ["CrewAI", "LangChain"],
+    "libraries": ["pandas", "requests", "crewai_tools", "streamlit"]
 }
+
     }
 
     # Get the selected use case data
@@ -257,7 +269,13 @@ with st.sidebar:
         "Scrape Policy Websites",
         "Match Policy to Profile",
         "Recommend Care Action"
-    ]
+    ],
+    "Public Threat Analysis": [
+    "Search and Scrape Crime Reports",
+    "Classify Crimes by Type and Trend",
+    "Generate Risk Score and Safety Recommendation"
+]
+
 }
 
     selected_tool_labels = tool_ui_map.get(use_case, [])
@@ -377,7 +395,25 @@ with st.sidebar:
         "Tool": "Recommend Care Action",
         "Function": "Suggests next steps like clinic visits or how to apply"
     }
-    ]
+    ],
+    "Public Threat Analysis": [
+    {
+        "Agent": "Crime Intelligence Analyst",
+        "Tool": "Search and Scrape Crime Reports",
+        "Function": "Collects and extracts recent crime data from news websites and public databases"
+    },
+    {
+        "Agent": "Crime Classification Agent",
+        "Tool": "Classify Crimes by Type and Trend",
+        "Function": "Categorizes crimes into violent, property, and drug-related types; analyzes frequency and trends"
+    },
+    {
+        "Agent": "Public Safety Advisor",
+        "Tool": "Generate Risk Score and Safety Recommendation",
+        "Function": "Evaluates crime severity, calculates threat score (1–10), and provides safety guidance for residents or visitors"
+    }
+]
+
 }
 
     # Default table when no use case is selected
@@ -480,7 +516,25 @@ with st.sidebar:
         "LLM Used": "gpt-3.5-turbo",
         "Purpose": "Provide actionable care steps"
     }
+],
+"Public Threat Analysis": [
+    {
+        "Agent": "Crime Intelligence Analyst",
+        "LLM Used": "gpt-3.5-turbo",
+        "Purpose": "Scrape and summarize recent crime data, categorize incidents by type and frequency"
+    },
+    {
+        "Agent": "Crime Classification Agent",
+        "LLM Used": "gpt-3.5-turbo",
+        "Purpose": "Analyze crime patterns and trends, assign a crime severity score"
+    },
+    {
+        "Agent": "Public Safety Advisor",
+        "LLM Used": "gpt-3.5-turbo",
+        "Purpose": "Evaluate overall safety level of the location and recommend public safety guidance"
+    }
 ]
+
 }
 
 
