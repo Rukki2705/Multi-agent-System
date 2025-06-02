@@ -2452,9 +2452,7 @@ def space_optimization_agent_ui():
         st.plotly_chart(fig, use_container_width=True)
 
         # Show optimization result if available
-        if "space_optimization" in st.session_state.results:
-            st.subheader("📋 Optimization Results")
-            st.markdown(st.session_state.results["space_optimization"])
+        
 
     # Optional chatbot / interaction panel
     chat_ui()
