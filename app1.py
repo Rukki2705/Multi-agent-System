@@ -2817,7 +2817,7 @@ def unemployment_policy_agent_ui():
             if result:
                 st.session_state.results["unemployment_policy"] = result
                 st.success("✅ Analysis complete.")
-                st.subheader("📋 AI-Generated Report")
+                st.subheader("📋 Agent Generated Report")
                 st.markdown(result)
 
     chat_ui()
@@ -2943,7 +2943,7 @@ def healthcare_policy_agent_ui():
             if result:
                 st.session_state.results["healthcare_policy"] = result
                 st.success("✅ Healthcare policy analysis complete.")
-                st.subheader("📋 AI-Generated Report")
+                st.subheader("📋 Agent Generated Report")
                 st.markdown(result)
 
     chat_ui()
