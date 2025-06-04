@@ -14,7 +14,7 @@ import numpy as np
 from pythermalcomfort.models import pmv_ppd_iso, utci
 from openai import OpenAI
 from crewai import Agent, Task, Crew, Process
-from crewai.tools import toolF
+from crewai.tools import tool
 from datetime import datetime
 import random
 from statsmodels.tsa.arima.model import ARIMA
