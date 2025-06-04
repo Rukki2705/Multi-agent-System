@@ -3,7 +3,9 @@ import os
 import streamlit as st
 import pandas as pd
 from scipy.optimize import minimize_scalar
+import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+from matplotlib.patheffects import withStroke
 from datetime import datetime, timedelta
 from io import BytesIO
 import matplotlib.pyplot as plt
@@ -12,7 +14,7 @@ import numpy as np
 from pythermalcomfort.models import pmv_ppd_iso, utci
 from openai import OpenAI
 from crewai import Agent, Task, Crew, Process
-from crewai.tools import tool
+from crewai.tools import toolF
 from datetime import datetime
 import random
 from statsmodels.tsa.arima.model import ARIMA
@@ -1033,73 +1035,112 @@ def get_adaptive_comfort_temp(outdoor_temp):
 
 
 
-
-
 def create_space_optimization_task(rooms_df, agent):
-    import os
     import json
-    from openai import OpenAI
-    import streamlit as st
+    
 
-    # ✅ Ensure the room data is available to all tools
+    # ✅ Store room data for tool usage
     st.session_state["rooms_df"] = rooms_df
 
-    # ✅ Run your tools (they rely on st.session_state["rooms_df"])
+    # ✅ Run space optimization tools
     occupancy_forecast = predict_occupancy_trend()
     consolidation_output = suggest_room_consolidation()
     rezoning_output = suggest_space_rezoning()
 
-    # ✅ Format the raw room data as JSON string for LLM context
+    # ✅ Convert DataFrame to readable JSON string
     formatted_data = json.dumps(rooms_df.to_dict(orient="records"), indent=2)
 
-    # ✅ Set up the LLM client
+    # ✅ Initialize OpenAI client
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-    # ✅ System role and LLM prompt
+    # ✅ Define the LLM's system role
     context = """
-You are a senior space optimization analyst. You have been provided:
-- Raw room data with environmental and occupancy metrics
-- Forecasted occupancy trends
-- Consolidation suggestions
-- Room zoning recommendations
+You are a senior space optimization analyst working with a facilities team. Your role is to create clear, data-driven reports that can be understood and implemented by new planners, building operators, and sustainability officers.
 
-You must now synthesize this into a professional and actionable optimization plan.
+You are provided with:
+- Current room data (occupancy, capacity, temperature, light, humidity, CO2, power usage, etc.)
+- Forecasted occupancy trends (6-hour forecast)
+- Consolidation recommendations based on low utilization and clustering zones
+- Space re-zoning results derived from environmental and usage-based clustering (KMeans)
+
+Use this information to generate a detailed, professional space optimization report. Your explanations should assume **no prior experience** with optimization and help the reader understand **what to do, why it's necessary, and how it impacts the space**.
 """
 
+    # ✅ Construct the detailed query prompt
     query = f"""
-📋 Raw Room Data (current snapshot):
+📋 **Room Data Snapshot** (raw inputs used by your tools):
 {formatted_data}
 
-📈 Forecasted Occupancy Trends (6-hour outlook):
+📈 **6-Hour Occupancy Forecasts**:
 {occupancy_forecast}
 
-🔄 Room Consolidation Suggestions:
+🔄 **Room Consolidation Analysis**:
 {consolidation_output}
 
-📍 Space Re-zoning Summary:
+📍 **Zone Assignments via Clustering**:
 {rezoning_output}
 
-Instructions:
-- Always reference the full 6-hour forecasted trend per room
-- Mention the time frame (e.g., next 6 hours)
-- Avoid vague language like "slight increase" — provide actual average and values
-- Use the forecasted occupancy values exactly as given for each room.
-- Use the current occupancy values from the dataset to compare with forecasts.
-- Identify rooms at risk of underutilization (e.g., forecasted avg < 0.3 OR current very low).
-- Recommend consolidation only for rooms showing both low forecast and low current usage.
-- Justify zoning choices using room attributes like occupancy, humidity, light, power.
+---
 
-Respond with:
-1. 📈 Occupancy Forecast Summary (mention specific rooms, trends, values)
-2. 🔄 Room Consolidation Plan with reasoning
-3. 📍 Space Rezoning Strategy — why rooms belong in each zone
-4. 💡 Additional Expert Suggestions — HVAC, lighting, scheduling improvements
-5. 📌 Final Action Plan: clear per-room next steps
+📑 Please provide a comprehensive, easy-to-follow space optimization report in 5 detailed sections:
+
+---
+
+1. 📈 **Occupancy Forecast Summary**  
+- For each room, list forecasted trend (increasing, stable, decreasing) and average value.  
+- Identify rooms that are **at risk of underutilization** (e.g., avg < 0.4 + decreasing trend).  
+- For borderline rooms (e.g., forecast ~0.45), recommend watchlist actions.  
+- Help the reader interpret what these trends mean for day-to-day space planning.
+
+---
+
+2. 🔄 **Room Consolidation Plan**  
+- Recommend consolidating rooms **only if all of these are true**:  
+  - Forecasted avg occupancy < 0.3  
+  - Effective utilization (occupancy × capacity) is low  
+  - Same zone or adjacent room exists with higher suitability (capacity/light)  
+- For each consolidation, explain clearly:  
+  - Who merges into whom  
+  - Why the chosen destination room is better  
+  - What impact it will have (space saved, energy saved, usability improved)  
+- If no rooms qualify for consolidation, explain **why not**, using forecast and utilization numbers.
+
+---
+
+3. 📍 **Space Re-zoning Strategy**  
+- Summarize the characteristics of each zone (e.g., Zone 0 = dim lighting + high CO2).  
+- List which rooms fall under each zone.  
+- Help the reader understand how this grouping helps — e.g., scheduling HVAC, designing shared-use areas, adjusting cleaning frequency, or reserving quiet zones.
+
+---
+
+4. 💡 **Expert-Level Recommendations**  
+Provide 2–3 suggestions based on the data for improving:
+- HVAC efficiency
+- Lighting automation
+- Flexible use of underutilized rooms
+Be specific. Say **which rooms** would benefit and **why**. Use occupancy, light, and temperature data to support your advice.
+
+---
+
+5. 📌 **Final Action Plan**  
+For **each room**, provide a table with the following columns:
+- **Action Type**: One of `Maintain`, `Merge`, `Repurpose`, `Reassign`  
+- **Priority**: High / Medium / Low (based on urgency, energy waste, or space impact)  
+- **Explanation**: If “Maintain”, **explain why no action is needed**, referencing stability in forecast and efficient utilization.  
+  Example: “Maintain – Room 24 has stable 0.48 forecast, adequate capacity, and is part of a balanced zone. No action needed, continue monitoring.”  
+- **Operational Suggestion**: Recommend something small to improve or monitor (e.g., install lighting sensors, review after 2 weeks, add signage for shared use)
+
+⚠️ **Avoid vague phrases like "slight increase"**. Be numerical, logical, and helpful.
+
+---
+
+🎯 This report should be fully understandable to someone new to building operations. Be descriptive, but concise. Use bullet points or tables where helpful.
 """
 
-
+    # ✅ Call OpenAI to get LLM response
     response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
+        model="gpt-3.5-turbo",  # or "gpt-4" if available
         messages=[
             {"role": "system", "content": context},
             {"role": "user", "content": query}
@@ -1108,11 +1149,14 @@ Respond with:
         max_tokens=1600
     )
 
+    # ✅ Return as structured CrewAI task
     return Task(
         description=response.choices[0].message.content.strip(),
         agent=agent,
-        expected_output="Detailed optimization plan with room-specific actions based on tool outputs."
+        expected_output="Comprehensive, zone-aware optimization plan with room-level actions and user-friendly recommendations."
     )
+
+
 
 
 
@@ -1373,24 +1417,33 @@ def create_layout_recommendation_task(rooms_data: pd.DataFrame, agent):
 
     # === LLM System Context ===
     context = """
-You are an experienced spatial planner and building layout consultant.
+You are a senior spatial planner and building architect with expertise in adaptive space design and energy-efficient layouts.
 
-Your job is to analyze detailed room-level data including occupancy, energy use, lighting, and environmental quality. Provide layout recommendations to improve space utilization, comfort, and adaptability.
+Your goal is to analyze room-level building data and provide thoughtful recommendations on layout improvement, usage adaptation, and space merging opportunities. Your reasoning must use multiple data points including occupancy, lighting, CO2, temperature, humidity, power usage, and HVAC status.
 
-🧠 Think like a professional architect. Go beyond restating values — explain how metrics lead to actions.
+🧠 Be critical and analytical:
+- If a room is underutilized but expensive to cool/light, propose repurposing.
+- If two adjacent rooms have similar usage and low walls, suggest a merge with justification.
+- If environmental conditions are poor (e.g., high CO2), flag it and suggest fixes.
+- If lighting is low but occupancy is high, recommend lighting upgrade.
+- If HVAC is always off, but power is high, suspect equipment usage and flag for check.
 
-🎯 Output Format:
-1. 🧠 Functional Analysis — Suggested use for each room with reasoning.
-2. 🔄 Multi-Use Opportunities — Rooms suitable for flexible/dual-purpose use.
-3. 🧱 Layout Change Actions — Proposed structural or functional layout changes.
-4. 📝 Summary — Give counts of:
-   - Repurposed rooms
-   - Multi-use zones created
-   - Merges proposed
+📋 Output Format (Markdown Required):
+1. **Functional Analysis**  
+   For each room: 
+   - Suggest specific use (e.g., quiet zone, training pod, open office)
+   - Justify based on at least 2–3 features per room
 
-Only include values found in the reasoning above. Do not estimate.
-Use markdown headers (**bold**), bullet points, and clear, concise explanations.
+2. **Multi-Use Opportunities**  
+   Identify rooms that could serve secondary purposes with minimal changes. Explain what would be added/removed (e.g., foldable tables, partitions).
+
+3. **Layout Change Actions**  
+   Suggest rooms that can be combined or divided. Describe physical layout change (e.g., remove partition wall, reconfigure lighting) and why it improves function.
+
+4. **Summary**  
+   Use counts based only on items above (no guessing). Keep numbers consistent with your suggestions.
 """
+
 
     # === LLM User Query ===
     query = f"""
@@ -1424,23 +1477,14 @@ Use markdown headers (**bold**), bullet points, and clear, concise explanations.
         room_labels[room_id] = cleaned if cleaned else "Unlabeled"
 
     # === Compute Your Own Summary (override GPT's if vague) ===
-    def compute_summary(text: str) -> str:
-        repurposed = len(re.findall(r"repurpose|transform|convert", text, re.IGNORECASE))
-        merged = len(re.findall(r"merge|combine", text, re.IGNORECASE))
-        multiuse = len(re.findall(r"multi-use|dual[- ]?purpose|flexible", text, re.IGNORECASE))
-        return f"""
-### 📝 Summary
-- {repurposed} rooms repurposed
-- {merged} merge actions proposed
-- {multiuse} multi-use zones identified
-""".strip()
+    
+
 
     # === Replace or Append Summary ===
-    if "📝 Summary" in raw_output:
-        # Remove original LLM summary
-        raw_output = re.sub(r"(?<=📝 Summary)(.|\n)*", "", raw_output).strip()
-    custom_summary = compute_summary(raw_output)
-    full_report = f"{raw_output}\n\n{custom_summary}"
+    # Remove entire 📝 Summary block if it exists
+    raw_output = re.sub(r"###? 📝 Summary[\s\S]*?(?=\n###|\Z)", "", raw_output).strip()
+    full_report = f"{raw_output}"
+
 
     # === Build and return the task ===
     task = Task(
@@ -1659,10 +1703,7 @@ def run_layout_recommendation(rooms_df):
             room_labels = recommend_room_function_map()  # ✅ Must return a dictionary
 
             # Step 5: Return everything needed for display
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": layout_report_markdown
-            })
+            
 
             return {
                 "crew_output": crew_output,
@@ -2117,8 +2158,8 @@ def thermal_comfort_agent_ui():
 
     with tab1:
         st.subheader("Single Building Input")
-        lat = st.number_input("Latitude", -90.0, 90.0, 20.0)
-        lon = st.number_input("Longitude", -180.0, 180.0, 78.0)
+        lat = st.number_input("Latitude", -90.0, 90.0, 40.730610)
+        lon = st.number_input("Longitude", -180.0, 180.0, -73.935242)
         st.map(pd.DataFrame({'lat': [lat], 'lon': [lon]}))
 
         weather_data = get_weather_data(lat, lon)
@@ -2173,8 +2214,8 @@ def thermal_comfort_agent_ui():
         st.subheader("Multiple Building Simulation")
         st.markdown("### 🌍 Location for Outdoor Weather Data")
 
-        lat = st.number_input("Latitude", -90.0, 90.0, value=20.0, key="multi_lat")
-        lon = st.number_input("Longitude", -180.0, 180.0, value=78.0, key="multi_lon")
+        lat = st.number_input("Latitude", -90.0, 90.0, value=40.730610, key="multi_lat")
+        lon = st.number_input("Longitude", -180.0, 180.0, value=-73.935242, key="multi_lon")
 
         
         n_buildings = st.number_input("Number of Buildings", 1, 100, 3)
@@ -2451,58 +2492,59 @@ def space_optimization_agent_ui():
         }
         st.plotly_chart(fig, use_container_width=True)
 
-        # Show optimization result if available
-        
-
     # Optional chatbot / interaction panel
     chat_ui()
 
 def draw_floor_plan(df, labels=None):
-    """
-    Draws a simple 2D floor plan layout.
+    fig, ax = plt.subplots(figsize=(14, 9))
     
-    Args:
-        df (pd.DataFrame): Must contain columns ['RoomID', 'X', 'Y', 'Width_ft', 'Height_ft']
-        labels (dict): Optional. Mapping of RoomID → predicted function label
-    """
-    fig, ax = plt.subplots(figsize=(12, 8))
-
     for _, row in df.iterrows():
         room_id = row['RoomID']
         x, y = row['X'], row['Y']
         width, height = row['Width_ft'], row['Height_ft']
-        label_text = labels.get(room_id, "Unlabeled") if labels else "Unlabeled"
+        function = labels.get(room_id, "Room") if labels else "Room"
 
-        # Draw room rectangle
-        rect = patches.Rectangle(
+        # Rectangle with blueprint style
+        rect = patches.FancyBboxPatch(
             (x, y),
             width,
             height,
-            linewidth=2,
-            edgecolor='black',
-            facecolor='lightblue'
+            boxstyle="round,pad=0.02",
+            linewidth=2.8,
+            edgecolor='#003366',
+            facecolor='#f0f0f5'
         )
         ax.add_patch(rect)
 
-        # Add text annotation inside the room
+        # Label inside the room
+        label = f"{function}\n{room_id}\n{int(width)}x{int(height)} ft"
         ax.text(
             x + width / 2,
             y + height / 2,
-            f"{room_id}\n{width}x{height} ft\n{label_text}",
+            label,
             ha='center',
             va='center',
-            fontsize=9,
-            wrap=True
+            fontsize=10,
+            fontweight='bold',
+            color='#002244',
+            linespacing=1.4
         )
 
-    ax.set_xlim(0, df["X"].max() + df["Width_ft"].max() + 5)
-    ax.set_ylim(0, df["Y"].max() + df["Height_ft"].max() + 5)
+    ax.set_xlim(0, df["X"].max() + df["Width_ft"].max() + 10)
+    ax.set_ylim(0, df["Y"].max() + df["Height_ft"].max() + 10)
     ax.set_aspect('equal')
     ax.axis('off')
+
+    # Optional blueprint-like grid
+    ax.set_axisbelow(True)
+    ax.yaxis.grid(True, which='major', linestyle='--', color='#e0e0e0')
+    ax.xaxis.grid(True, which='major', linestyle='--', color='#e0e0e0')
+
     plt.gca().invert_yaxis()
-    plt.title("🏠 Room Layout with Predicted Functions", fontsize=14)
+    plt.title("Room Layout Plan", fontsize=18, fontweight='bold', color='#003366', pad=20)
     plt.tight_layout()
     st.pyplot(fig)
+
 
 def layout_recommendation_agent_ui():
     st.header("Layout Planner")
@@ -2541,12 +2583,12 @@ def layout_recommendation_agent_ui():
     # === Action buttons ===
     col1, col2 = st.columns(2)
 
-    with col1:
+    with col2:
         if st.button("Refresh Layout Data"):
             st.session_state.rooms_df = get_live_room_data1(num_rooms=st.session_state.num_rooms)
             st.rerun()
 
-    with col2:
+    with col1:
         if st.button("Generate Layout Recommendations"):
             if not st.session_state.get("openai_api_key"):
                 st.error("Please enter a valid OpenAI API key to generate recommendations.")
@@ -2610,8 +2652,8 @@ def layout_recommendation_agent_ui():
         st.subheader("🧠 Layout Recommendation Report")
         st.markdown(layout_result["layout_report_markdown"])
 
-        st.subheader("📐 Updated Room Layout with Predicted Functions")
-        draw_floor_plan(rooms_df, labels=layout_result["room_labels"])
+        #st.subheader("📐 Updated Room Layout with Predicted Functions")
+        #draw_floor_plan(rooms_df, labels=layout_result["room_labels"])
 
     # === Optional Chat UI (if you want to add interactive chatbot for Q&A) ===
     chat_ui()
@@ -2695,29 +2737,35 @@ def unemployment_policy_agent_ui():
             # Dynamically create agents based on inputs
             job_market_agent = Agent(
                 role="Job Market Monitoring Agent",
-                goal=f"Collect live job posting data for {region} from platforms like Indeed and LinkedIn, and identify the top 5 high-demand roles.",
-                backstory="I uncover hiring trends by scraping job boards.",
+                goal=(
+                    f"Find at least 5 job postings for '{desired_title}' in {region} on LinkedIn or Indeed.\n"
+                    f"Format your response like this:\n\n"
+                    "**Top Job Roles:**\n"
+                    "1. Title: ...\n   Industry: ...\n   Salary: ...\n   Key Skills: ...\n"
+                    "... (5 roles)\n\n"
+                    "**Hiring Trends Summary:**\nA few sentences summarizing what these job postings say about the market."
+                ),
+                backstory="I Scrape Linkedin and Indeed to find job postings, I stay up to date on job trends can find the best jobs for applicants.",
                 allow_delegation=True,
                 verbose=True,
                 tools=[search_tool, scrape_tool]
             )
 
-            demographic_agent = Agent(
-                role="Demographic Impact Agent",
-                goal=f"Fetch unemployment rate data by age, education, and ethnicity for {region}, analyze disparities, and highlight the most affected groups.",
-                backstory="I analyze public statistics to assess unemployment disparities.",
-                allow_delegation=True,
-                verbose=True,
-                tools=[search_tool, scrape_tool]
-            )
 
             citizen_agent = Agent(
                 role="Citizen Guidance Agent",
                 goal=(
-                    f"Based on job market and demographic findings, provide personalized guidance "
-                    f"on suitable jobs and retraining programs for a user with skills: {', '.join(profile_skills)}, "
-                    f"experience: {experience_years} years, education: {education_level}, location: {region}, "
-                    f"desired role: {desired_title}. {f'LinkedIn: {linkedin_url}' if linkedin_url else f'Summary: {summary_text}'}"
+                    f"Based on the user's profile (Skills: {', '.join(profile_skills)}, Experience: {experience_years}, Education: {education_level}), "
+                    f"match them to roles from the job market data. Recommend 3 jobs and 5 retraining options.\n\n"
+                    f"Format:\n\n"
+                    "**Personalized Recommendations:**\n"
+                    "**Jobs Matched:**\n"
+                    "1. Role: ...\n   Match Reason: ...\n   Salary: ...\n"
+                    "... (3 roles)\n\n"
+                    "**Courses or Programs:**\n"
+                    "1. Name: ...\n   Platform: ...\n   Link: ...\n   Relevance: ...\n"
+                    "... (5 total)\n\n"
+                    "**Final Guidance:**\nEncouraging summary paragraph."
                 ),
                 backstory="I craft actionable recommendations tailored to individual needs.",
                 allow_delegation=True,
@@ -2727,14 +2775,11 @@ def unemployment_policy_agent_ui():
 
             # Dynamically create tasks
             job_task = Task(
-                description=f"Monitor live job postings for {region} and identify the top 5 high-demand roles.",
-                expected_output="Ranked list of the top 5 high-demand roles with summary statistics.",
-                agent=None
-            )
-
-            demo_task = Task(
-                description=f"Retrieve and analyze unemployment rates by age, education, and ethnicity for {region}. Highlight the most affected groups.",
-                expected_output="Report on demographic disparities in unemployment.",
+                description=
+                    f"Find at least 5 job postings in the {desired_title} field on Linkedin or Indeed near {region}."
+                    f"Show the user a List of 5 jobs that they can apply for in the {desired_title} field"
+                    ,
+                expected_output="Ranked list of the top 5 roles with summary statistics and structured description.",
                 agent=None
             )
 
@@ -2748,22 +2793,23 @@ def unemployment_policy_agent_ui():
                     f"- Location: {user_profile['location']}\n"
                     f"- Desired Job Title: {user_profile['desired_title']}\n"
                     f"{'Refer to their LinkedIn profile for detailed experience: ' + user_profile['linkedin_url'] if user_profile['linkedin_url'] else 'Summary of experience: ' + user_profile['summary']}\n\n"
-                    f"Use this data to tailor recommendations to specific industries, training, or roles the user can explore. Highlight why each suggestion matches the profile."
+                    "Using the data, find courses, or programs online that can help the user improve their skills and marketability"
+                    "Show the user a list of at least 5 programs or courses that can build their skills"
             ),
                 expected_output="Tailored job and retraining recommendations based on the user's background and job market trends.",
                 agent=None
             )
 
 
-            agents = [citizen_agent, demographic_agent, job_market_agent]
-            tasks = [job_task, demo_task, guidance_task]
+            agents = [citizen_agent, job_market_agent]
+            tasks = [job_task, guidance_task]
             assigned_tasks = assign_tasks_dynamically(tasks, agents, supervisor_llm)
 
             crew = Crew(
                 agents=agents,
                 tasks=assigned_tasks,
                 verbose=True,
-                process=Process.hierarchical,
+                process=Process.sequential,
                 manager_llm=supervisor_llm
             )
             result = crew.kickoff()
@@ -2888,7 +2934,7 @@ def healthcare_policy_agent_ui():
                 agents=agents,
                 tasks=assigned_tasks,
                 verbose=True,
-                process=Process.hierarchical,
+                process=Process.sequential,
                 manager_llm=supervisor_llm
             )
 
@@ -2931,11 +2977,16 @@ def public_threat_analysis_ui():
             crime_agent = Agent(
                 role="Crime Intelligence Analyst",
                 goal=(
-                    f"Scrape the web for recent crime data in {location_input}. "
-                    "Categorize crimes by type (violent, property, drug-related), frequency, and trend. "
-                    "Provide a crime severity score from 1 to 10 and summarize major incidents."
+                    f"Scrape the web for crime data in {location_input}. Categorize into Robbery, Murder, etc. "
+                    "Assign a score (1–10) for each category. Format the output as:\n\n"
+                    "**Crime Categories and Scores:**\n1. Robbery: Score - X\n2. Murder: Score - Y\n..."
+                    "Then explain the scores below.\n\n"
+                    "5. When Assigning the score, make sure it is consistent with the inputted location and represents the severity correctly. Provide reasoning/evidence why you assinged a score."
                 ),
-                backstory="A former crime analyst skilled in parsing incident data and risk scoring for urban regions.",
+                backstory=
+                "I’m a former crime analyst with experience working in urban risk assessment and predictive policing."
+                "My specialty is extracting patterns from complex, real-time crime feeds and historical data sets."
+                "I excel at identifying hidden crime trends and translating raw incident reports into risk scores.",
                 tools=[search_tool, scrape_tool],
                 allow_delegation=True,
                 verbose=True
@@ -2944,10 +2995,14 @@ def public_threat_analysis_ui():
             safety_agent = Agent(
                 role="Public Safety Advisor",
                 goal=(
-                    f"Evaluate how safe {location_input} is to live in or visit based on crime patterns and frequency. "
-                    "Provide a clear summary and recommendation for public safety."
+                    f"Based on the report given by the Crime Intelligence Analyst Agent, tell the user if {location_input} is safe to live or not."
+                    "Used reasoning based on living conditions, crime, and all relevant details to make a decision on the safety of living in the location"
+                    "Show the user the crime report generated by the Crime Intelligence Analyst Agent, with, crime categories, and corresponding score. "
                 ),
-                backstory="Experienced in community safety communication and public risk reporting.",
+                backstory=
+                "I’m a public safety strategist trained in advising individuals, families, and travelers on community risk and urban security."
+                "I’ve consulted for both city governments and NGOs on how to communicate safety threats clearly and responsibly."
+                "I provide actionable safety insights, even in gray zones.",
                 tools=[search_tool, scrape_tool],
                 allow_delegation=True,
                 verbose=True
@@ -2956,19 +3011,25 @@ def public_threat_analysis_ui():
             # TASKS
             crime_task = Task(
                 description=(
-                    f"Collect and analyze recent crime data for {location_input}. "
-                    "Categorize incidents, note trends, and assign a severity score (1–10)."
+                    f"Search the web and collect data on recent crimes that happened in {location_input} in the last one year."
+                    "Evaluate the efficiency of first responders in the area."
+                    "Identify the frequency of reported crimes over the past 7–30 days, note any trends or spikes, "
                 ),
-                expected_output="Crime summary with types, counts, trends, and overall threat level (1–10).",
+                expected_output="A list of severity scores for each category of crime.",
                 agent=None
             )
 
             safety_task = Task(
                 description=(
-                    f"Using the crime data from {location_input}, generate a public safety report. "
-                    "Make a recommendation on whether it's safe to live in or visit, and suggest precautions."
+                    f"Based on the crime data summary provided by the Crime Intelligence Analyst and the safety of {location_input}, "
+                    "evaluate the safety of the area for residents or visitors. Provide a clear recommendation on whether the area "
+                    "is currently safe to live in or visit, supported by reasoning. Suggest any safety precautions if needed."
                 ),
-                expected_output="Public-facing report summarizing threat level and safety recommendation.",
+                expected_output=
+                    "A public-facing safety assessment summarizing the threat level, key concerns, and a final recommendation "
+                    "on whether the area is safe to live in or visit. Include practical tips or warnings based on the crime context."
+                    "The output should also include the report generated by the crime intelligence analyst agent."
+                    ,
                 agent=None
             )
 
@@ -2980,8 +3041,8 @@ def public_threat_analysis_ui():
             crew = Crew(
                 agents=agents,
                 tasks=assigned_tasks,
-                verbose=True,
-                process=Process.hierarchical,
+                verbose=False,
+                process=Process.sequential,
                 manager_llm=supervisor_llm
             )
 
@@ -2993,6 +3054,7 @@ def public_threat_analysis_ui():
                 st.markdown(result)
 
     chat_ui()
+
 
 
 
@@ -3310,6 +3372,8 @@ def calculate_dynamic_pricing_cost(usage_series: pd.Series, pricing_scheme: dict
 
 
 def predict_occupancy_trend(room_id: Optional[str] = None) -> str:
+    from scipy.stats import linregress
+
     """Forecast future occupancy for a given room using ARIMA. Returns summary and trend for each room."""
     try:
         rooms_df = st.session_state.get("rooms_df")
@@ -3321,7 +3385,9 @@ def predict_occupancy_trend(room_id: Optional[str] = None) -> str:
 
         for rid in room_ids:
             # Simulate synthetic historical occupancy data (last 48 hours)
-            history = [round(random.uniform(0.0, 1.0), 2) for _ in range(48)]
+            current_occ = rooms_df.loc[rooms_df["RoomID"] == rid, "Occupancy"].values[0]
+            history = [round(current_occ + random.uniform(-0.1, 0.1), 2) for _ in range(48)]
+
 
             try:
                 model = ARIMA(history, order=(2, 1, 1))
@@ -3334,15 +3400,18 @@ def predict_occupancy_trend(room_id: Optional[str] = None) -> str:
                 min_occ = min(forecast_values)
 
                 # Determine trend direction
-                if forecast_values[-1] > forecast_values[0]:
+                x_vals = list(range(len(forecast_values)))
+                slope, _, _, _, _ = linregress(x_vals, forecast_values)
+
+                if slope > 0.01:
                     trend = "📈 Increasing"
-                elif forecast_values[-1] < forecast_values[0]:
+                elif slope < -0.01:
                     trend = "📉 Decreasing"
                 else:
                     trend = "➡️ Stable"
 
                 forecast_results.append(
-                    f"📊 **Room:** {rid}\n"
+                    f"📊 *Room:* {rid}\n"
                     f"- Forecasted occupancy over next 6 hours (hourly): {', '.join(map(str, forecast_values))}\n"
                     f"- Avg: {avg_occ}, Max: {max_occ}, Min: {min_occ}\n"
                     f"- Trend: {trend}\n"
@@ -3354,7 +3423,6 @@ def predict_occupancy_trend(room_id: Optional[str] = None) -> str:
 
     except Exception as e:
         return f"❌ Occupancy trend forecast failed: {e}"
-
 
 
 
@@ -3381,27 +3449,46 @@ def simulate_energy_reduction(room: dict) -> str:
         return f"❌ Failed to simulate energy reduction: {e}"
 
 
-
-
 def suggest_room_consolidation() -> str:
-    """Suggest consolidation of underutilized rooms based on occupancy threshold."""
+    """Suggest smart consolidation of underutilized rooms based on occupancy, capacity, and zone."""
     try:
         rooms_df = st.session_state.get("rooms_df")
         if rooms_df is None or rooms_df.empty:
-            return "⚠️ No live room data available."
+            return "⚠️ No room data available."
 
-        underused = rooms_df[rooms_df["Occupancy"] < 0.3]
+        if "Zone" not in rooms_df.columns:
+            return "⚠️ Zones not assigned. Please run zoning first."
+
+        # Step 1: Calculate effective utilization
+        rooms_df["EffectiveUtilization"] = rooms_df["Occupancy"] * rooms_df.get("Capacity", 1)
+
+        # Step 2: Filter underutilized rooms
+        underused = rooms_df[rooms_df["EffectiveUtilization"] < 5]  # customizable threshold
         if underused.empty:
-            return "✅ All rooms have adequate occupancy. No consolidation needed."
+            return "✅ All rooms are sufficiently utilized. No consolidation needed."
 
+        # Step 3: Group by zone and suggest consolidation
         suggestions = []
-        for _, row in underused.iterrows():
-            suggestions.append(
-                f"🔄 Room {row['RoomID']} has low occupancy ({row['Occupancy']*100:.1f}%). Consider merging or closing."
+        for zone, group in underused.groupby("Zone"):
+            if len(group) < 2:
+                continue  # Not enough rooms to consolidate
+
+            # Sort by capacity or light to find best target
+            target_room = group.sort_values(by=["Capacity", "Light"], ascending=False).iloc[0]
+            other_rooms = group[group["RoomID"] != target_room["RoomID"]]["RoomID"].tolist()
+
+            suggestion = (
+                f"🔄 Zone {zone}: Consolidate rooms {', '.join(other_rooms)} into Room {target_room['RoomID']} "
+                f"(best suited due to higher capacity or lighting)."
             )
-        return "\n".join(suggestions)
+            suggestions.append(suggestion)
+
+        return "\n".join(suggestions) if suggestions else "✅ No consolidation needed after analysis."
+
     except Exception as e:
         return f"❌ Error during consolidation suggestion: {e}"
+
+
 
 
 
